@@ -1,4 +1,4 @@
-# Philips USB PC Link Activator
+# Philips USB PC Link Activator for Windows
 
 Windows utility for bringing back Philips **USB PC Link** playback on modern
 Windows systems.

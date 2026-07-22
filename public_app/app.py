@@ -69,7 +69,7 @@ class Bridge(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Philips USB PC Link Activator")
+        self.setWindowTitle("Philips USB PC Link Activator for Windows")
         self.resize(860, 620)
         self.app_icon = QIcon(str(app_root() / "assets" / "app.ico"))
         self.setWindowIcon(self.app_icon)
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         self.bridge.refresh.connect(self.poll_status)
         self.bridge.device_status.connect(self.apply_status)
 
-        self.title_label = QLabel("Philips USB PC Link Activator")
+        self.title_label = QLabel("Philips USB PC Link Activator for Windows")
         self.title_label.setObjectName("titleLabel")
         self.profile_label = QLabel("Perfil: detectando aparelho USB PC Link...")
         self.profile_label.setObjectName("profileLabel")
@@ -234,7 +234,7 @@ class MainWindow(QMainWindow):
         if self.app_icon.isNull():
             self.app_icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
         self.tray_icon.setIcon(self.app_icon)
-        self.tray_icon.setToolTip("Philips USB PC Link Activator")
+        self.tray_icon.setToolTip("Philips USB PC Link Activator for Windows")
 
         menu = QMenu(self)
         open_action = QAction("Abrir", self)
@@ -265,7 +265,7 @@ class MainWindow(QMainWindow):
         self.hide()
         if not self._tray_notice_shown and self.tray_icon.isVisible():
             self.tray_icon.showMessage(
-                "Philips USB PC Link Activator",
+                "Philips USB PC Link Activator for Windows",
                 "O app continua ativo na bandeja para reativar o PC Link.",
                 QSystemTrayIcon.Information,
                 3000,
@@ -444,7 +444,7 @@ class MainWindow(QMainWindow):
             self,
             "Sobre",
             (
-                "Philips USB PC Link Activator\n\n"
+                "Philips USB PC Link Activator for Windows\n\n"
                 "Idealizado e testado originalmente por Rafael Jaeger.\n"
                 "Criado para recuperar o USB PC Link de aparelhos Philips antigos "
                 "em Windows modernos.\n\n"
@@ -487,7 +487,7 @@ def main() -> int:
         if "--minimized" not in sys.argv:
             QMessageBox.information(
                 None,
-                "Philips USB PC Link Activator",
+                "Philips USB PC Link Activator for Windows",
                 "O app ja esta aberto. Procure o icone de caixinha na bandeja do Windows.",
             )
         return 0
