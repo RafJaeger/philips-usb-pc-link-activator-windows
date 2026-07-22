@@ -3,6 +3,9 @@
 Windows utility for restoring Philips USB PC Link playback on modern Windows
 systems.
 
+Target platform: Windows 10 and Windows 11. Windows 8/8.1 may work, but it is
+not release-validated yet.
+
 This project was idealized and originally validated by **Rafael Jaeger** on a
 Philips FW-M589/FWM589 unit. The first supported device family appears in
 Windows as `Philips Audio Set` with USB ID `0471:0111`.

@@ -216,6 +216,11 @@ class MainWindow(QMainWindow):
         self.last_activation = 0.0
         self.last_ready = False
         self._last_auto_log = 0.0
+        self._operation_lock = threading.Lock()
+        self._operation_running = False
+        self._last_status = None
+        self._buttons_backoff_until = 0.0
+        self._last_button_error = ""
         self._status_running = False
         self._control_ready = False
         self._force_quit = False
@@ -293,8 +298,16 @@ class MainWindow(QMainWindow):
     def set_status_text(self, message: str) -> None:
         self.status_label.setText(message)
 
-    def run_bg(self, label: str, fn, log_result: bool = True) -> None:
+    def run_bg(self, label: str, fn, log_result: bool = True, exclusive: bool = False) -> None:
         def worker() -> None:
+            lock_acquired = False
+            if exclusive:
+                lock_acquired = self._operation_lock.acquire(blocking=False)
+                if not lock_acquired:
+                    self.bridge.log.emit("Operacao USB em andamento; aguarde terminar.")
+                    return
+                self._operation_running = True
+                self.bridge.refresh.emit()
             self.bridge.log.emit(label)
             try:
                 result = fn()
@@ -303,6 +316,9 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.bridge.log.emit(f"Erro: {exc}")
             finally:
+                if lock_acquired:
+                    self._operation_running = False
+                    self._operation_lock.release()
                 self.bridge.refresh.emit()
 
         threading.Thread(target=worker, daemon=True).start()
@@ -330,6 +346,7 @@ class MainWindow(QMainWindow):
             return
 
         if status.profile:
+            self._last_status = status
             self.radio_listener.set_profile(status.profile)
             models = ", ".join(status.profile.known_models[:4])
             self.profile_label.setText(
@@ -339,25 +356,29 @@ class MainWindow(QMainWindow):
             self.profile_label.setText("Perfil: nenhum aparelho suportado detectado")
 
         driver_installed = status.interface3_service == "WinUSB"
-        can_install = bool(status.profile and status.present and not driver_installed)
+        operation_running = self._operation_running
+        can_install = bool(status.profile and status.present and not driver_installed and not operation_running)
         self.install_button.setEnabled(can_install)
-        if not status.present:
+        if operation_running:
+            self.install_button.setText("Aguarde...")
+        elif not status.present:
             self.install_button.setText("Aguardando Aparelho")
         elif driver_installed:
             self.install_button.setText("Driver WinUSB Instalado")
         else:
             self.install_button.setText("Instalar Driver WinUSB")
 
-        self.activate_button.setEnabled(status.interface3_ok)
-        self.power_button.setEnabled(status.interface3_ok)
-        self.default_button.setEnabled(status.audio_present)
-        self.capture_button.setEnabled(status.interface3_ok)
-        self.restore_button.setEnabled(bool(status.present and status.interface3_service))
+        self.activate_button.setEnabled(status.interface3_ok and not operation_running)
+        self.power_button.setEnabled(status.interface3_ok and not operation_running)
+        self.default_button.setEnabled(status.audio_present and not operation_running)
+        self.capture_button.setEnabled(status.interface3_ok and not operation_running)
+        self.diagnostics_button.setEnabled(not operation_running)
+        self.restore_button.setEnabled(bool(status.present and status.interface3_service and not operation_running))
         self.default_button.setText("Saida Padrao Ativa" if status.default_output else "Usar Como Saida Padrao")
 
         ready = bool(status.interface3_ok)
         self._control_ready = ready
-        if ready:
+        if ready and not operation_running:
             self.sync_button_listener()
         elif self.radio_listener.running:
             self.radio_listener.stop()
@@ -368,14 +389,34 @@ class MainWindow(QMainWindow):
             self.bridge.log.emit("Philips pronto.")
         self.last_ready = ready
 
-        if self.auto_checkbox.isChecked() and ready:
+        if self.auto_checkbox.isChecked() and ready and not operation_running:
             now = time.time()
             if not was_ready or now - self.last_activation > 25:
                 self.last_activation = now
                 self.activate_now(auto=True)
 
     def install_driver(self) -> None:
-        self.run_bg("Instalando WinUSB somente na Interface 3. Aceite o UAC.", install_winusb_driver)
+        restart_buttons = self.radio_listener.running
+
+        def install_safely() -> str:
+            if restart_buttons:
+                self.radio_listener.stop()
+            install_winusb_driver()
+            deadline = time.time() + 30
+            last_summary = ""
+            while time.time() < deadline:
+                status = get_status()
+                last_summary = status.summary
+                if status.interface3_ok:
+                    return "Driver WinUSB instalado e interface de controle pronta."
+                time.sleep(1)
+            return (
+                "Driver instalado, mas o Windows ainda nao liberou a interface para controle. "
+                f"Ultimo status: {last_summary or 'sem status'}. "
+                "Tire e coloque o cabo USB, selecione PC Link novamente e aguarde o app atualizar."
+            )
+
+        self.run_bg("Instalando WinUSB somente na Interface 3. Aceite o UAC.", install_safely, exclusive=True)
 
     def activate_now(self, auto: bool = False) -> None:
         label = "Auto-reativando PC Link..." if auto else "Ativando PC Link..."
@@ -397,7 +438,7 @@ class MainWindow(QMainWindow):
                 if restart_buttons:
                     self.radio_listener.start()
 
-        self.run_bg(label, activate_safely, log_result=log_result)
+        self.run_bg(label, activate_safely, log_result=log_result, exclusive=True)
 
     def power_on_now(self) -> None:
         restart_buttons = self.buttons_checkbox.isChecked() and self.radio_listener.running
@@ -411,7 +452,7 @@ class MainWindow(QMainWindow):
                 if restart_buttons and self._control_ready:
                     self.radio_listener.start()
 
-        self.run_bg("Tentando ligar/reativar o radio pelo PC Link...", power_safely)
+        self.run_bg("Tentando ligar/reativar o radio pelo PC Link...", power_safely, exclusive=True)
 
     def set_default_output_now(self) -> None:
         self.run_bg("Definindo Philips como saida padrao do Windows...", set_default_output)
@@ -434,10 +475,11 @@ class MainWindow(QMainWindow):
         self.run_bg(
             "Capturando botoes por 15s. Aperte Play/Pause, Next e Previous no controle remoto agora...",
             capture_safely,
+            exclusive=True,
         )
 
     def restore_control_driver_now(self) -> None:
-        self.run_bg("Restaurando Interface 3 para HID do Windows. Aceite o UAC.", restore_control_driver)
+        self.run_bg("Restaurando Interface 3 para HID do Windows. Aceite o UAC.", restore_control_driver, exclusive=True)
 
     def show_about(self) -> None:
         QMessageBox.about(
@@ -464,6 +506,8 @@ class MainWindow(QMainWindow):
         if self.buttons_checkbox.isChecked():
             if not self._control_ready:
                 return
+            if time.time() < self._buttons_backoff_until:
+                return
             if not self.radio_listener.running:
                 self.radio_listener.start()
                 self.log("Leitor de botoes do radio ligado.")
@@ -475,6 +519,11 @@ class MainWindow(QMainWindow):
         self.bridge.log.emit(f"Botao: {name} raw={raw.hex(' ')}")
 
     def on_button_error(self, message: str) -> None:
+        if "LIBUSB_ERROR_ACCESS" in message:
+            self._buttons_backoff_until = time.time() + 20
+        if message == self._last_button_error and time.time() < self._buttons_backoff_until:
+            return
+        self._last_button_error = message
         self.bridge.log.emit(f"Botoes: {message}")
 
 

@@ -3,6 +3,9 @@
 Windows utility for bringing back Philips **USB PC Link** playback on modern
 Windows systems.
 
+Target platform: Windows 10 and Windows 11. Windows 8/8.1 may work, but it is
+not release-validated yet.
+
 Idealized and originally tested by **Rafael Jaeger**, after validating the
 recovery path on a Philips FW-M589/FWM589 unit.
 
@@ -97,6 +100,9 @@ Desktop capture file when requesting support for a new mapping. Unknown reports
 should be mapped only after a real capture; the app intentionally avoids turning
 random bytes into media keys.
 
+Known status packets such as `80 4a` are logged as unknown diagnostics and must
+not be treated as media buttons.
+
 ## Ligar Radio
 
 The `Ligar Radio` button currently means "try to wake or reactivate PC Link".
@@ -117,6 +123,12 @@ button capture is active. The main UI intentionally does not expose a software
 volume slider until endpoint/hardware synchronization is reliable per model.
 True hardware volume synchronization should be treated as experimental until
 verified per model.
+
+The app does not re-encode, resample or route audio through its own mixer. Audio
+playback stays on the Philips USB Audio interface exposed to Windows, so quality
+is limited by the stereo's USB audio format, the Windows audio engine settings
+and the source material. For the cleanest output, avoid clipping in Windows/app
+volume and use the Philips endpoint directly.
 
 ## Development
 

@@ -323,23 +323,17 @@ def decode_button_report(
     if not data:
         return [], 0, 0
 
-    standard_bits = data[0] & SUPPORTED_MEDIA_MASK
-    alt_bits = 0
-    if len(data) > 1 and standard_bits == 0:
-        alt_bits = data[1] & SUPPORTED_MEDIA_MASK
+    if data[0] & ~SUPPORTED_MEDIA_MASK:
+        return [], 0, 0
 
+    standard_bits = data[0] & SUPPORTED_MEDIA_MASK
     events: list[ButtonEvent] = []
     standard_pressed = standard_bits & ~previous_standard_bits
     for bit, (name, vk_code) in MEDIA_KEYS.items():
         if standard_pressed & (1 << bit):
             events.append(ButtonEvent(bit, name, vk_code, "standard", data))
 
-    alt_pressed = alt_bits & ~previous_alt_bits
-    for bit, (name, vk_code) in MEDIA_KEYS.items():
-        if alt_pressed & (1 << bit):
-            events.append(ButtonEvent(bit, name, vk_code, "remote-alt-byte", data))
-
-    return events, standard_bits, alt_bits
+    return events, standard_bits, 0
 
 
 def install_winusb_driver(profile: DeviceProfile | None = None) -> None:
@@ -654,6 +648,8 @@ class RadioButtonListener:
         self._thread: threading.Thread | None = None
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_unknown_report: bytes | None = None
+        self._last_unknown_report_time = 0.0
 
     @property
     def running(self) -> bool:
@@ -672,6 +668,8 @@ class RadioButtonListener:
         self._profile = profile
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_unknown_report = None
+        self._last_unknown_report_time = 0.0
         if was_running:
             self.start()
 
@@ -689,6 +687,8 @@ class RadioButtonListener:
         self._thread = None
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_unknown_report = None
+        self._last_unknown_report_time = 0.0
 
     def _run(self) -> None:
         try:
@@ -733,7 +733,11 @@ class RadioButtonListener:
                             handle_media_button(event.bit, event.vk_code, self._profile)
                             self._on_event(event.label, data)
                     elif any(data):
-                        self._on_event("Relatorio HID desconhecido", data)
+                        now = time.monotonic()
+                        if data != self._last_unknown_report or now - self._last_unknown_report_time > 15:
+                            self._last_unknown_report = data
+                            self._last_unknown_report_time = now
+                            self._on_event("Relatorio HID desconhecido", data)
             finally:
                 try:
                     handle.releaseInterface(self._profile.control_interface)
