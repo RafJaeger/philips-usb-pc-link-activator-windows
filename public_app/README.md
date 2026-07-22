@@ -37,8 +37,6 @@ USB\VID_0471&PID_0111&MI_03
   media controls.
 - Captures raw control reports so new front-panel or remote-control formats can
   be mapped safely for additional models.
-- Includes an experimental `Ligar Radio` action that sends the known PC Link
-  activation sequence when the stereo is already visible on USB.
 - Provides startup and auto-reactivation options for daily use.
 
 ## Supported Hardware
@@ -102,14 +100,6 @@ random bytes into media keys.
 
 Known status packets such as `80 4a` are logged as unknown diagnostics and must
 not be treated as media buttons.
-
-## Ligar Radio
-
-The `Ligar Radio` button currently means "try to wake or reactivate PC Link".
-It sends the same safe PC Link activation packets used by `Ativar PC Link`.
-This can work only while Windows can still see the stereo on USB. A true
-model-specific power-on command has not been confirmed yet and should be added
-only after a USB capture from the original Philips Windows XP/Vista software.
 
 ## Volume Behavior
 

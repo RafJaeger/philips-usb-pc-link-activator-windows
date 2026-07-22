@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -170,14 +169,6 @@ def _profile_instance_filter(profile: DeviceProfile) -> str:
 
 def _parse_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() == "true"
-
-
-def _usb_device_present(profile: DeviceProfile) -> bool:
-    try:
-        with usb1.USBContext() as ctx:
-            return _find_device(ctx, profile) is not None
-    except Exception:
-        return False
 
 
 def _read_usb_interface_service(profile: DeviceProfile) -> str | None:
@@ -423,23 +414,6 @@ def send_pc_link_enable(profile: DeviceProfile | None = None) -> str:
                 handle.close()
 
 
-def try_radio_power_on(profile: DeviceProfile | None = None) -> str:
-    active_profile = profile or detect_profile() or default_profile()
-    if not _usb_device_present(active_profile):
-        return (
-            f"{active_profile.display_name} nao aparece no USB agora. "
-            "Para ligar de verdade, o radio precisa estar em standby com USB enumerado; "
-            "se ele sumiu do Windows, use o botao do aparelho ou controle remoto."
-        )
-
-    result = send_pc_link_enable(active_profile)
-    return (
-        result
-        + "\nTentativa de ligar/reativar enviada. Este app ainda nao tem um comando Power On dedicado "
-        "confirmado; por enquanto ele usa a sequencia segura de ativacao do PC Link."
-    )
-
-
 def find_philips_render_endpoint(profile: DeviceProfile | None = None):
     active_profile = profile or detect_profile() or default_profile()
     audio_id = active_profile.audio_hardware_prefix.upper()
@@ -620,18 +594,6 @@ def capture_button_reports(
     lines.append("")
     lines.append(f"Arquivo salvo: {destination}")
     return "\n".join(lines)
-
-
-def export_portable_release(destination: Path) -> None:
-    source = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else app_root()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(
-        source,
-        destination,
-        ignore=shutil.ignore_patterns("__pycache__", "build", "*.pyc"),
-    )
 
 
 class RadioButtonListener:

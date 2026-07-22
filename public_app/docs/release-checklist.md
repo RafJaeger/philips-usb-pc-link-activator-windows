@@ -13,8 +13,8 @@
 - Confirm Play/Pause, Stop, Next, Previous, Mute, Volume Up, and Volume Down.
 - Confirm `Capturar Controle` records front-panel and remote-control reports
   without sending duplicate media keys during capture.
-- Confirm `Ligar Radio` only runs when the USB control interface is ready, and
-  logs that it is a PC Link wake/reactivation attempt.
+- Confirm `Ativar PC Link` changes to `PC Link Ativo` after a successful
+  activation and becomes available again after reconnect/driver loss.
 - Confirm Start with Windows writes only the current user's Run key.
 - Confirm Restore HID returns `MI_03` to the Windows HID/input driver.
 - Generate diagnostics and verify it does not include private user content.

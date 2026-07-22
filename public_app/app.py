@@ -38,7 +38,6 @@ from philips_pc_link_core import (
     set_default_output,
     set_start_with_windows,
     send_pc_link_enable,
-    try_radio_power_on,
 )
 
 ERROR_ALREADY_EXISTS = 183
@@ -89,7 +88,6 @@ class MainWindow(QMainWindow):
 
         self.install_button = QPushButton("Instalar Driver WinUSB")
         self.activate_button = QPushButton("Ativar PC Link Agora")
-        self.power_button = QPushButton("Ligar Radio")
         self.default_button = QPushButton("Usar Como Saida Padrao")
         self.diagnostics_button = QPushButton("Gerar Diagnostico")
         self.capture_button = QPushButton("Capturar Controle")
@@ -108,7 +106,6 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         actions.addWidget(self.install_button)
         actions.addWidget(self.activate_button)
-        actions.addWidget(self.power_button)
         actions.addWidget(self.default_button)
         actions.addWidget(self.diagnostics_button)
 
@@ -203,7 +200,6 @@ class MainWindow(QMainWindow):
 
         self.install_button.clicked.connect(self.install_driver)
         self.activate_button.clicked.connect(self.activate_now)
-        self.power_button.clicked.connect(self.power_on_now)
         self.default_button.clicked.connect(self.set_default_output_now)
         self.diagnostics_button.clicked.connect(self.export_diagnostics_now)
         self.capture_button.clicked.connect(self.capture_remote_buttons_now)
@@ -218,7 +214,7 @@ class MainWindow(QMainWindow):
         self._last_auto_log = 0.0
         self._operation_lock = threading.Lock()
         self._operation_running = False
-        self._last_status = None
+        self._pc_link_active = False
         self._buttons_backoff_until = 0.0
         self._last_button_error = ""
         self._status_running = False
@@ -346,7 +342,6 @@ class MainWindow(QMainWindow):
             return
 
         if status.profile:
-            self._last_status = status
             self.radio_listener.set_profile(status.profile)
             models = ", ".join(status.profile.known_models[:4])
             self.profile_label.setText(
@@ -368,8 +363,8 @@ class MainWindow(QMainWindow):
         else:
             self.install_button.setText("Instalar Driver WinUSB")
 
-        self.activate_button.setEnabled(status.interface3_ok and not operation_running)
-        self.power_button.setEnabled(status.interface3_ok and not operation_running)
+        self.activate_button.setEnabled(status.interface3_ok and not operation_running and not self._pc_link_active)
+        self.activate_button.setText("PC Link Ativo" if status.interface3_ok and self._pc_link_active else "Ativar PC Link Agora")
         self.default_button.setEnabled(status.audio_present and not operation_running)
         self.capture_button.setEnabled(status.interface3_ok and not operation_running)
         self.diagnostics_button.setEnabled(not operation_running)
@@ -378,6 +373,8 @@ class MainWindow(QMainWindow):
 
         ready = bool(status.interface3_ok)
         self._control_ready = ready
+        if not ready:
+            self._pc_link_active = False
         if ready and not operation_running:
             self.sync_button_listener()
         elif self.radio_listener.running:
@@ -433,26 +430,14 @@ class MainWindow(QMainWindow):
             if restart_buttons:
                 self.radio_listener.stop()
             try:
-                return send_pc_link_enable()
+                result = send_pc_link_enable()
+                self._pc_link_active = True
+                return result
             finally:
                 if restart_buttons:
                     self.radio_listener.start()
 
         self.run_bg(label, activate_safely, log_result=log_result, exclusive=True)
-
-    def power_on_now(self) -> None:
-        restart_buttons = self.buttons_checkbox.isChecked() and self.radio_listener.running
-
-        def power_safely() -> str:
-            if restart_buttons:
-                self.radio_listener.stop()
-            try:
-                return try_radio_power_on()
-            finally:
-                if restart_buttons and self._control_ready:
-                    self.radio_listener.start()
-
-        self.run_bg("Tentando ligar/reativar o radio pelo PC Link...", power_safely, exclusive=True)
 
     def set_default_output_now(self) -> None:
         self.run_bg("Definindo Philips como saida padrao do Windows...", set_default_output)
