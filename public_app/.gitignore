@@ -1,0 +1,26 @@
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.spec.bak
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Local packaging output
+release/
+*.zip
+*.7z
+
+# Local captures and support dumps
+diagnostics/
+captures/
+*.pcap
+*.pcapng

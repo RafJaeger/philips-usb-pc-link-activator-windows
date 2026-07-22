@@ -1,0 +1,21 @@
+# Keep the repository focused on the public app.
+*
+!.gitignore
+!README.md
+!LICENSE
+!public_app/
+!public_app/**
+
+# Never publish local research dumps or generated artifacts if they are moved
+# under the app folder by accident.
+public_app/build/
+public_app/dist/
+public_app/*.spec
+public_app/__pycache__/
+public_app/**/*.pyc
+public_app/**/*.pyo
+public_app/**/*.log
+public_app/.venv/
+public_app/venv/
+public_app/.idea/
+public_app/.vscode/
