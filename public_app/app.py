@@ -6,11 +6,12 @@ import threading
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QTimer, Signal, QObject
+from PySide6.QtCore import QTimer, Signal, QObject, QSettings
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -28,9 +29,9 @@ from PySide6.QtWidgets import (
 from philips_pc_link_core import (
     RadioButtonListener,
     app_root,
-    capture_button_reports,
+    default_log_path,
     detect_profile,
-    export_diagnostics,
+    export_log,
     get_start_with_windows,
     get_status,
     install_winusb_driver,
@@ -86,11 +87,12 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Verificando Philips Audio Set...")
         self.status_label.setObjectName("statusLabel")
 
+        self.settings = QSettings("RafJaeger", "PhilipsUSBPCLinkActivator")
+
         self.install_button = QPushButton("Instalar Driver WinUSB")
         self.activate_button = QPushButton("Ativar PC Link Agora")
         self.default_button = QPushButton("Usar Como Saida Padrao")
-        self.diagnostics_button = QPushButton("Gerar Diagnostico")
-        self.capture_button = QPushButton("Capturar Controle")
+        self.log_button = QPushButton("Gerar Log")
         self.restore_button = QPushButton("Restaurar Controle HID")
         self.about_button = QPushButton("Sobre")
         self.buttons_checkbox = QCheckBox("Ativar botoes do radio")
@@ -107,10 +109,9 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.install_button)
         actions.addWidget(self.activate_button)
         actions.addWidget(self.default_button)
-        actions.addWidget(self.diagnostics_button)
 
         advanced = QHBoxLayout()
-        advanced.addWidget(self.capture_button)
+        advanced.addWidget(self.log_button)
         advanced.addWidget(self.restore_button)
         advanced.addWidget(self.about_button)
         advanced.addStretch(1)
@@ -201,8 +202,7 @@ class MainWindow(QMainWindow):
         self.install_button.clicked.connect(self.install_driver)
         self.activate_button.clicked.connect(self.activate_now)
         self.default_button.clicked.connect(self.set_default_output_now)
-        self.diagnostics_button.clicked.connect(self.export_diagnostics_now)
-        self.capture_button.clicked.connect(self.capture_remote_buttons_now)
+        self.log_button.clicked.connect(self.export_log_now)
         self.restore_button.clicked.connect(self.restore_control_driver_now)
         self.about_button.clicked.connect(self.show_about)
         self.buttons_checkbox.stateChanged.connect(self.sync_button_listener)
@@ -221,6 +221,7 @@ class MainWindow(QMainWindow):
         self._control_ready = False
         self._force_quit = False
         self._tray_notice_shown = False
+        self._last_usb_connection_key = None
         self.setup_tray()
 
         self.timer = QTimer(self)
@@ -343,9 +344,8 @@ class MainWindow(QMainWindow):
 
         if status.profile:
             self.radio_listener.set_profile(status.profile)
-            models = ", ".join(status.profile.known_models[:4])
             self.profile_label.setText(
-                f"Perfil: {status.profile.display_name} ({status.profile.vid_pid_label}) | Modelos: {models}..."
+                f"Perfil: {status.profile.display_name} ({status.profile.vid_pid_label})"
             )
         else:
             self.profile_label.setText("Perfil: nenhum aparelho suportado detectado")
@@ -366,12 +366,19 @@ class MainWindow(QMainWindow):
         self.activate_button.setEnabled(status.interface3_ok and not operation_running and not self._pc_link_active)
         self.activate_button.setText("PC Link Ativo" if status.interface3_ok and self._pc_link_active else "Ativar PC Link Agora")
         self.default_button.setEnabled(status.audio_present and not operation_running)
-        self.capture_button.setEnabled(status.interface3_ok and not operation_running)
-        self.diagnostics_button.setEnabled(not operation_running)
+        self.log_button.setEnabled(not operation_running)
         self.restore_button.setEnabled(bool(status.present and status.interface3_service and not operation_running))
         self.default_button.setText("Saida Padrao Ativa" if status.default_output else "Usar Como Saida Padrao")
 
         ready = bool(status.interface3_ok)
+        connection_changed = bool(
+            ready
+            and status.usb_connection_key
+            and status.usb_connection_key != self._last_usb_connection_key
+        )
+        if connection_changed:
+            self._pc_link_active = False
+        self._last_usb_connection_key = status.usb_connection_key
         self._control_ready = ready
         if not ready:
             self._pc_link_active = False
@@ -388,7 +395,7 @@ class MainWindow(QMainWindow):
 
         if self.auto_checkbox.isChecked() and ready and not operation_running:
             now = time.time()
-            if not was_ready or now - self.last_activation > 25:
+            if not was_ready or connection_changed or now - self.last_activation > 25:
                 self.last_activation = now
                 self.activate_now(auto=True)
 
@@ -413,7 +420,11 @@ class MainWindow(QMainWindow):
                 "Tire e coloque o cabo USB, selecione PC Link novamente e aguarde o app atualizar."
             )
 
-        self.run_bg("Instalando WinUSB somente na Interface 3. Aceite o UAC.", install_safely, exclusive=True)
+        self.run_bg(
+            "Instalando WinUSB somente na Interface 3. Aceite o UAC.",
+            install_safely,
+            exclusive=True,
+        )
 
     def activate_now(self, auto: bool = False) -> None:
         label = "Auto-reativando PC Link..." if auto else "Ativando PC Link..."
@@ -442,26 +453,22 @@ class MainWindow(QMainWindow):
     def set_default_output_now(self) -> None:
         self.run_bg("Definindo Philips como saida padrao do Windows...", set_default_output)
 
-    def export_diagnostics_now(self) -> None:
-        self.run_bg("Gerando diagnostico para suporte/novos modelos...", export_diagnostics)
-
-    def capture_remote_buttons_now(self) -> None:
-        restart_buttons = self.buttons_checkbox.isChecked() and self.radio_listener.running
-
-        def capture_safely() -> str:
-            if restart_buttons:
-                self.radio_listener.stop()
-            try:
-                return capture_button_reports(duration_seconds=15.0)
-            finally:
-                if restart_buttons and self._control_ready:
-                    self.radio_listener.start()
-
-        self.run_bg(
-            "Capturando botoes por 15s. Aperte Play/Pause, Next e Previous no controle remoto agora...",
-            capture_safely,
-            exclusive=True,
+    def export_log_now(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar log como",
+            str(default_log_path()),
+            "Texto (*.txt);;Todos os arquivos (*)",
         )
+        if not chosen:
+            self.log("Log cancelado.")
+            return
+
+        def export_safely() -> str:
+            saved = export_log(destination=chosen)
+            return f"Log salvo: {saved}"
+
+        self.run_bg("Gerando log...", export_safely)
 
     def restore_control_driver_now(self) -> None:
         self.run_bg("Restaurando Interface 3 para HID do Windows. Aceite o UAC.", restore_control_driver, exclusive=True)

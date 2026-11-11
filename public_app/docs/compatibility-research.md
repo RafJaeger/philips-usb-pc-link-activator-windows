@@ -2,6 +2,14 @@
 
 Date: 2026-07-22
 
+Update 2026-11-11: Rafael reports working app playback on FWM589, FWM779,
+FWC577, FWM922 and FWM992. MCM units with USB PC Link (MCM530/MCM570/MCM590/
+MCM595) enumerate as the same `0471:0111` device and are recognized by the
+app, but MCM playback is not yet confirmed on modern Windows. The app sends a
+single validated activation (A4EF=01, A4F0=FF) to every unit. The evidence
+table below records the earlier research, not the latest Windows playback
+status.
+
 This note tracks known and likely Philips "USB PC Link" systems for the public
 app. It does not change code. The safest initial support target is the Philips
 composite USB audio family that enumerates as `Philips Audio Set` with

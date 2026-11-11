@@ -14,6 +14,9 @@ if ($Clean) {
 }
 
 python -m pip install -r .\requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    throw "pip install failed (exit code $LASTEXITCODE)."
+}
 
 python -m PyInstaller `
     --noconfirm `
@@ -31,5 +34,8 @@ python -m PyInstaller `
     --add-data "VERSION;." `
     --add-data "THIRD_PARTY_NOTICES.md;." `
     app.py
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed (exit code $LASTEXITCODE). If dist is locked, close the running app first."
+}
 
 Write-Host "Build ready: $AppRoot\dist\Philips_PC_Link_Activator"

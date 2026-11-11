@@ -12,6 +12,13 @@ class ControlPacket:
     payload: bytes
 
 
+# Validated USB PC Link activation (FWM589 and other Philips Audio Set units).
+PC_LINK_PACKETS: tuple[ControlPacket, ...] = (
+    ControlPacket(0x40, 0x04, 0x0000, 0xA4EF, bytes.fromhex("01")),
+    ControlPacket(0x40, 0x04, 0x0000, 0xA4F0, bytes.fromhex("FF")),
+)
+
+
 @dataclass(frozen=True)
 class DeviceProfile:
     profile_id: str
@@ -55,13 +62,15 @@ SUPPORTED_PROFILES: tuple[DeviceProfile, ...] = (
         interrupt_endpoint=0x83,
         interrupt_packet_size=2,
         driver_package="winusb-philips-mi03",
-        pc_link_packets=(
-            ControlPacket(0x40, 0x04, 0x0000, 0xA4EF, bytes([0x01])),
-            ControlPacket(0x40, 0x04, 0x0000, 0xA4F0, bytes([0xFF])),
-        ),
+        pc_link_packets=PC_LINK_PACKETS,
         known_models=(
+            # FWM / FWC micro systems
             "FWM589",
             "FW-M779 / FWM779",
+            "FW-C577 / FWC577",
+            "FWM922",
+            "FWM992",
+            # MCM micro systems with USB PC Link
             "MC-M530 / MCM530",
             "MC-M570 / MCM570",
             "MCM590",

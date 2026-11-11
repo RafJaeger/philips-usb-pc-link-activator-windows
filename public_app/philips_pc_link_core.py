@@ -15,6 +15,8 @@ import comtypes
 import usb1
 from pycaw.pycaw import AudioUtilities, ERole
 
+import platform
+
 from profiles import SUPPORTED_PROFILES, DeviceProfile, default_profile, find_profile_by_usb_id
 
 MEDIA_KEYS = {
@@ -58,6 +60,7 @@ class DeviceStatus:
     windows_volume: float | None
     muted: bool | None
     summary: str
+    usb_connection_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,27 @@ def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def desktop_dir() -> Path:
+    """Real Desktop folder, including when Windows redirects it (e.g. OneDrive).
+
+    Falls back to Documents and then the user's home folder, so saving a
+    diagnostic never fails just because ``~/Desktop`` does not exist.
+    """
+    shell_folders = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, shell_folders) as key:
+            value, _ = winreg.QueryValueEx(key, "Desktop")
+        candidate = Path(os.path.expandvars(str(value)))
+        if candidate.is_dir():
+            return candidate
+    except OSError:
+        pass
+    for candidate in (Path.home() / "Desktop", Path.home() / "Documents"):
+        if candidate.is_dir():
+            return candidate
+    return Path.home()
 
 
 def driver_dir(profile: DeviceProfile | None = None) -> Path:
@@ -252,19 +276,29 @@ def detect_pnp_profile() -> PnpStatus | None:
 
 
 def detect_profile() -> DeviceProfile | None:
+    profile, _ = detect_usb_connection()
+    return profile
+
+
+def detect_usb_connection() -> tuple[DeviceProfile | None, str | None]:
     try:
         with usb1.USBContext() as ctx:
             for dev in ctx.getDeviceIterator(skip_on_error=True):
                 profile = find_profile_by_usb_id(dev.getVendorID(), dev.getProductID())
-                if profile is not None:
-                    return profile
+                if profile is None:
+                    continue
+                key = (
+                    f"{dev.getBusNumber()}:{dev.getDeviceAddress()}:"
+                    f"{dev.getbcdDevice():04x}"
+                )
+                return profile, key
     except Exception:
         pass
-    return None
+    return None, None
 
 
 def get_status() -> DeviceStatus:
-    usb_profile = detect_profile()
+    usb_profile, usb_connection_key = detect_usb_connection()
     pnp = detect_pnp_profile()
     profile = usb_profile or (pnp.profile if pnp else None)
     if profile is None:
@@ -303,6 +337,7 @@ def get_status() -> DeviceStatus:
         windows_volume=None,
         muted=None,
         summary=summary,
+        usb_connection_key=usb_connection_key,
     )
 
 
@@ -393,10 +428,12 @@ def send_pc_link_enable(profile: DeviceProfile | None = None) -> str:
                 serial = dev.getSerialNumber()
             except Exception:
                 serial = "desconhecido"
+            revision = dev.getbcdDevice()
             handle = dev.open()
             try:
                 lines = [
-                    f"{active_profile.display_name} encontrado: bus={dev.getBusNumber()} addr={dev.getDeviceAddress()} serial={serial!r}"
+                    f"{active_profile.display_name} encontrado: bus={dev.getBusNumber()} "
+                    f"addr={dev.getDeviceAddress()} serial={serial!r} revisao={revision:04x}",
                 ]
                 for packet in active_profile.pc_link_packets:
                     sent = handle.controlWrite(
@@ -407,7 +444,15 @@ def send_pc_link_enable(profile: DeviceProfile | None = None) -> str:
                         packet.payload,
                         timeout=1000,
                     )
-                    lines.append(f"PC Link: wIndex=0x{packet.index:04x} sent={sent}")
+                    if sent != len(packet.payload):
+                        raise RuntimeError(
+                            f"Transferencia incompleta em 0x{packet.index:04x}: enviados "
+                            f"{sent} de {len(packet.payload)} bytes."
+                        )
+                    lines.append(
+                        f"PC Link: wIndex=0x{packet.index:04x} sent="
+                        f"{sent}/{len(packet.payload)}"
+                    )
                     time.sleep(0.03)
                 return "\n".join(lines)
             finally:
@@ -482,21 +527,105 @@ def is_philips_default_output(profile: DeviceProfile | None = None) -> bool:
     return str(getattr(device, "id", "")).lower() == str(getattr(speakers, "id", "")).lower()
 
 
-def export_diagnostics(profile: DeviceProfile | None = None) -> Path:
-    active_profile = profile or detect_profile() or default_profile()
+def describe_usb_topology(profile: DeviceProfile) -> str:
+    """Read-only libusb descriptor dump used by the diagnostics export."""
+    lines = ["USB interfaces and endpoints (read-only descriptors):"]
+    try:
+        with USB_LOCK, usb1.USBContext() as ctx:
+            found = False
+            for dev in ctx.getDeviceIterator(skip_on_error=True):
+                if (dev.getVendorID(), dev.getProductID()) != (profile.vendor_id, profile.product_id):
+                    continue
+                found = True
+                lines.append(
+                    f"Device {dev.getVendorID():04x}:{dev.getProductID():04x} bcdDevice="
+                    f"{dev.getbcdDevice():04x} bcdUSB={dev.getbcdUSB():04x} bus="
+                    f"{dev.getBusNumber()} address={dev.getDeviceAddress()}"
+                )
+                for config in dev.iterConfigurations():
+                    lines.append(f"  Configuration {config.getConfigurationValue()}")
+                    control_match = False
+                    for interface in config:
+                        for setting in interface:
+                            number = setting.getNumber()
+                            cls, subclass = setting.getClass(), setting.getSubClass()
+                            role = {(1, 1): "AudioControl", (1, 2): "AudioStreaming"}.get(
+                                (cls, subclass), "HID" if cls == 3 else "Other"
+                            )
+                            lines.append(
+                                f"    Interface {number} (MI_{number:02X}) alt={setting.getAlternateSetting()} class=0x"
+                                f"{cls:02x} subclass=0x{subclass:02x} protocol=0x"
+                                f"{setting.getProtocol():02x} {role}"
+                            )
+                            for extra in setting.getExtra():
+                                lines.append(f"      Extra descriptor: {bytes(extra).hex(' ')}")
+                            for endpoint in setting:
+                                address = endpoint.getAddress()
+                                kind = ("control", "isochronous", "bulk", "interrupt")[endpoint.getAttributes() & 3]
+                                direction = "IN (device to PC)" if address & 0x80 else "OUT (PC to device)"
+                                lines.append(
+                                    f"      Endpoint 0x{address:02x} {direction} {kind} maxPacketSize="
+                                    f"{endpoint.getMaxPacketSize()} interval={endpoint.getInterval()}"
+                                )
+                                if number == profile.control_interface and (
+                                    address == profile.interrupt_endpoint and kind == "interrupt"
+                                ):
+                                    control_match = True
+                    lines.append(
+                        f"  Expected control MI_{profile.control_interface:02X} / endpoint 0x"
+                        f"{profile.interrupt_endpoint:02x}: "
+                        + ("present" if control_match else "NOT FOUND in this configuration; review descriptors")
+                    )
+            if not found:
+                lines.append("Device not visible through libusb; see Windows PnP/driver data below.")
+    except Exception as exc:
+        lines.append(f"Descriptor read failed: {type(exc).__name__}: {exc}")
+    return "\n".join(lines)
+
+
+def app_version() -> str:
+    try:
+        return (app_root() / "VERSION").read_text(encoding="utf-8").strip() or "desconhecida"
+    except OSError:
+        return "desconhecida"
+
+
+def default_log_path() -> Path:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    destination = Path.home() / "Desktop" / f"philips-usb-pc-link-diagnostics-{timestamp}.txt"
+    return desktop_dir() / f"philips-usb-pc-link-log-{timestamp}.txt"
+
+
+def export_log(profile: DeviceProfile | None = None, *, destination: Path | str | None = None) -> Path:
+    """Write a single support log: app/device status, Windows PnP/driver data and USB descriptors."""
+    active_profile = profile or detect_profile() or default_profile()
+    destination = Path(destination) if destination is not None else default_log_path()
+
+    status = get_status()
+    header = [
+        "Philips USB PC Link - log",
+        f"App: {app_version()}",
+        f"Data: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Windows: {platform.platform()}",
+        f"Perfil: {active_profile.display_name} ({active_profile.vid_pid_label})",
+        f"Modelos suportados: {', '.join(active_profile.known_models)}",
+        "",
+        "Estado atual:",
+        f"  Aparelho presente: {'sim' if status.present else 'nao'}",
+        f"  Driver da Interface 3: {status.interface3_service or 'nao detectado'}",
+        f"  Pronto para PC Link: {'sim' if status.interface3_ok else 'nao'}",
+        f"  Audio presente no Windows: {'sim' if status.audio_present else 'nao'}",
+        f"  Saida padrao do Windows: {'sim' if status.default_output else 'nao'}",
+        f"  Resumo: {status.summary}",
+        "",
+    ]
+
     script = rf"""
-"Philips USB PC Link Diagnostics"
-"Timestamp: $(Get-Date -Format o)"
-"Profile: {active_profile.profile_id} ({active_profile.vid_pid_label})"
-""
-"PnP devices:"
+"Dispositivos PnP:"
 Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
   $_.InstanceId -match 'VID_{active_profile.vendor_id:04X}&PID_{active_profile.product_id:04X}|Philips Audio Set'
 }} | Format-List Status,Class,FriendlyName,InstanceId
 ""
-"Driver properties:"
+"Propriedades do driver:"
 Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
   $_.InstanceId -match 'VID_{active_profile.vendor_id:04X}&PID_{active_profile.product_id:04X}'
 }} | ForEach-Object {{
@@ -507,93 +636,12 @@ Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
 }}
 """
     result = _run_powershell(script)
-    destination.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
+    topology = describe_usb_topology(active_profile)
+
+    body = "\n".join(header) + result.stdout + "\n" + result.stderr + "\n" + topology + "\n"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(body, encoding="utf-8")
     return destination
-
-
-def capture_button_reports(
-    duration_seconds: float = 15.0,
-    profile: DeviceProfile | None = None,
-    max_reports: int = 80,
-) -> str:
-    active_profile = profile or detect_profile() or default_profile()
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    destination = Path.home() / "Desktop" / f"philips-usb-pc-link-button-capture-{timestamp}.txt"
-    lines = [
-        "Philips USB PC Link button capture",
-        f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Profile: {active_profile.profile_id} ({active_profile.vid_pid_label})",
-        f"Duration: {duration_seconds:.1f}s",
-        "",
-        "Pressione os botoes fisicos e do controle remoto durante a captura.",
-        "",
-    ]
-
-    standard_bits = 0
-    alt_bits = 0
-    last_raw: bytes | None = None
-    report_count = 0
-    start = time.monotonic()
-    end = start + max(1.0, float(duration_seconds))
-
-    with USB_LOCK:
-        with usb1.USBContext() as ctx:
-            dev = _find_device(ctx, active_profile)
-            if dev is None:
-                raise RuntimeError(f"{active_profile.display_name} {active_profile.vid_pid_label} nao encontrado.")
-            handle = dev.open()
-            try:
-                try:
-                    handle.claimInterface(active_profile.control_interface)
-                except usb1.USBError:
-                    pass
-
-                while time.monotonic() < end and report_count < max_reports:
-                    timeout_ms = min(250, max(1, int((end - time.monotonic()) * 1000)))
-                    try:
-                        data = bytes(
-                            handle.interruptRead(
-                                active_profile.interrupt_endpoint,
-                                active_profile.interrupt_packet_size,
-                                timeout=timeout_ms,
-                            )
-                        )
-                    except usb1.USBErrorTimeout:
-                        standard_bits = 0
-                        alt_bits = 0
-                        continue
-
-                    if not data:
-                        continue
-                    events, standard_bits, alt_bits = decode_button_report(data, standard_bits, alt_bits)
-                    if data == last_raw and not events:
-                        continue
-
-                    elapsed = time.monotonic() - start
-                    decoded = ", ".join(event.label for event in events) if events else "sem mapeamento"
-                    lines.append(f"{elapsed:05.2f}s raw={data.hex(' ')} decoded={decoded}")
-                    last_raw = data
-                    report_count += 1
-            finally:
-                try:
-                    handle.releaseInterface(active_profile.control_interface)
-                except Exception:
-                    pass
-                handle.close()
-
-    if report_count == 0:
-        lines.append(
-            "Nenhum relatorio recebido. Se os botoes fisicos funcionam fora da captura, "
-            "confirme se o leitor de botoes estava pausado e tente novamente."
-        )
-    elif report_count >= max_reports:
-        lines.append("")
-        lines.append(f"Captura encerrada no limite de {max_reports} relatorios.")
-
-    destination.write_text("\n".join(lines), encoding="utf-8")
-    lines.append("")
-    lines.append(f"Arquivo salvo: {destination}")
-    return "\n".join(lines)
 
 
 class RadioButtonListener:
