@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import sys
 import threading
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QTimer, Signal, QObject, QSettings
+from PySide6.QtCore import QTimer, Signal, QObject, QSettings, QEventLoop
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,8 +28,10 @@ from PySide6.QtWidgets import (
 )
 
 from philips_pc_link_core import (
+    LEARNABLE_ACTIONS,
     RadioButtonListener,
     app_root,
+    capture_next_report,
     default_log_path,
     detect_profile,
     export_log,
@@ -64,6 +67,7 @@ class Bridge(QObject):
     status = Signal(str)
     refresh = Signal()
     device_status = Signal(object)
+    capture_done = Signal()
 
 
 class MainWindow(QMainWindow):
@@ -92,6 +96,7 @@ class MainWindow(QMainWindow):
         self.install_button = QPushButton("Instalar Driver WinUSB")
         self.activate_button = QPushButton("Ativar PC Link Agora")
         self.default_button = QPushButton("Usar Como Saida Padrao")
+        self.learn_button = QPushButton("Aprender Controle")
         self.log_button = QPushButton("Gerar Log")
         self.restore_button = QPushButton("Restaurar Controle HID")
         self.about_button = QPushButton("Sobre")
@@ -111,6 +116,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.default_button)
 
         advanced = QHBoxLayout()
+        advanced.addWidget(self.learn_button)
         advanced.addWidget(self.log_button)
         advanced.addWidget(self.restore_button)
         advanced.addWidget(self.about_button)
@@ -202,6 +208,7 @@ class MainWindow(QMainWindow):
         self.install_button.clicked.connect(self.install_driver)
         self.activate_button.clicked.connect(self.activate_now)
         self.default_button.clicked.connect(self.set_default_output_now)
+        self.learn_button.clicked.connect(self.learn_remote_now)
         self.log_button.clicked.connect(self.export_log_now)
         self.restore_button.clicked.connect(self.restore_control_driver_now)
         self.about_button.clicked.connect(self.show_about)
@@ -209,6 +216,8 @@ class MainWindow(QMainWindow):
         self.startup_checkbox.stateChanged.connect(self.sync_startup)
 
         self.radio_listener = RadioButtonListener(self.on_radio_button, self.on_button_error, detect_profile())
+        self._learned_map = self._load_learned_map()
+        self.radio_listener.set_learned_map(self._learned_map)
         self.last_activation = 0.0
         self.last_ready = False
         self._last_auto_log = 0.0
@@ -366,6 +375,7 @@ class MainWindow(QMainWindow):
         self.activate_button.setEnabled(status.interface3_ok and not operation_running and not self._pc_link_active)
         self.activate_button.setText("PC Link Ativo" if status.interface3_ok and self._pc_link_active else "Ativar PC Link Agora")
         self.default_button.setEnabled(status.audio_present and not operation_running)
+        self.learn_button.setEnabled(status.interface3_ok and not operation_running)
         self.log_button.setEnabled(not operation_running)
         self.restore_button.setEnabled(bool(status.present and status.interface3_service and not operation_running))
         self.default_button.setText("Saida Padrao Ativa" if status.default_output else "Usar Como Saida Padrao")
@@ -469,6 +479,103 @@ class MainWindow(QMainWindow):
             return f"Log salvo: {saved}"
 
         self.run_bg("Gerando log...", export_safely)
+
+    # ----- Aprender controle -----
+
+    def _learned_key(self) -> str:
+        return f"learned/{self.radio_listener.active_profile.profile_id}"
+
+    def _load_learned_map(self) -> dict:
+        raw = self.settings.value(self._learned_key())
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def _capture_one(self, timeout_s: float) -> bytes | None:
+        """Capture one report from the GUI thread without freezing the UI."""
+        result: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                result["data"] = capture_next_report(timeout_s=timeout_s)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = str(exc)
+            self.bridge.capture_done.emit()
+
+        loop = QEventLoop()
+        self.bridge.capture_done.connect(loop.quit)
+        threading.Thread(target=worker, daemon=True).start()
+        loop.exec()
+        self.bridge.capture_done.disconnect(loop.quit)
+        if "error" in result:
+            raise RuntimeError(str(result["error"]))
+        return result.get("data")  # type: ignore[return-value]
+
+    def learn_remote_now(self) -> None:
+        if not self._control_ready:
+            QMessageBox.information(
+                self,
+                "Aprender Controle",
+                "Ative o PC Link antes de aprender o controle (o aparelho precisa estar pronto).",
+            )
+            return
+        if not self._operation_lock.acquire(blocking=False):
+            self.log("Operacao USB em andamento; aguarde terminar.")
+            return
+
+        was_listening = self.radio_listener.running
+        self.radio_listener.stop()
+        self._operation_running = True
+        self.bridge.refresh.emit()
+        learned = dict(self._learned_map)
+        try:
+            for action_id, label, _bit, _vk in LEARNABLE_ACTIONS:
+                box = QMessageBox(self)
+                box.setWindowTitle("Aprender Controle")
+                box.setText(
+                    f"Botao: {label}\n\n"
+                    "Clique em Capturar e aperte esse botao no controle.\n"
+                    "Pular mantem o que ja estava; Encerrar para a captura."
+                )
+                capture = box.addButton("Capturar", QMessageBox.AcceptRole)
+                skip = box.addButton("Pular", QMessageBox.RejectRole)
+                stop = box.addButton("Encerrar", QMessageBox.DestructiveRole)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is stop:
+                    break
+                if clicked is skip:
+                    continue
+
+                self.log(f"Aprendendo '{label}': aperte o botao no controle agora...")
+                try:
+                    data = self._capture_one(8.0)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"Falha ao capturar '{label}': {exc}")
+                    continue
+                if data is None:
+                    self.log(f"Nada recebido para '{label}' (tempo esgotado).")
+                    continue
+                key = data.hex()
+                # One code maps to one action: drop any earlier binding of it.
+                learned = {k: v for k, v in learned.items() if k != key}
+                learned[key] = action_id
+                self.log(f"'{label}' aprendido: {data.hex(' ')}")
+
+            self._learned_map = learned
+            self.settings.setValue(self._learned_key(), json.dumps(learned))
+            self.radio_listener.set_learned_map(learned)
+            self.log(f"Controle salvo: {len(learned)} botao(oes) mapeado(s).")
+        finally:
+            self._operation_running = False
+            self._operation_lock.release()
+            if was_listening and self._control_ready:
+                self.radio_listener.start()
+            self.bridge.refresh.emit()
 
     def restore_control_driver_now(self) -> None:
         self.run_bg("Restaurando Interface 3 para HID do Windows. Aceite o UAC.", restore_control_driver, exclusive=True)

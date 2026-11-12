@@ -29,6 +29,21 @@ MEDIA_KEYS = {
     6: ("Volume Down", 0xAE),
 }
 
+# Actions the user can teach from a remote control. Each one reuses the same
+# handling as a panel button: (action_id, label, bit, Windows media vk_code).
+# The bit drives the volume/mute special-casing in handle_media_button.
+LEARNABLE_ACTIONS: tuple[tuple[str, str, int, int], ...] = (
+    ("playpause", "Play / Pause", 0, 0xB3),
+    ("next", "Avancar", 2, 0xB0),
+    ("prev", "Voltar", 3, 0xB1),
+    ("stop", "Parar", 1, 0xB2),
+    ("volup", "Volume +", 5, 0xAF),
+    ("voldown", "Volume -", 6, 0xAE),
+    ("mute", "Mudo", 4, 0xAD),
+)
+
+ACTION_LABELS = {action_id: label for action_id, label, _bit, _vk in LEARNABLE_ACTIONS}
+
 APP_RUN_KEY = "PhilipsUSBPCLinkActivator"
 USB_LOCK = threading.RLock()
 SUPPORTED_MEDIA_MASK = 0x7F
@@ -644,6 +659,56 @@ Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
     return destination
 
 
+def capture_next_report(
+    profile: DeviceProfile | None = None,
+    *,
+    timeout_s: float = 8.0,
+    stop_event: threading.Event | None = None,
+) -> bytes | None:
+    """Wait for the next non-empty HID report from the control interface.
+
+    Used by the "learn remote" flow: the caller asks the user to press one
+    button, and this returns the raw bytes that button sends (or None on
+    timeout). Returns the raw report so different remotes/models can be mapped.
+    """
+    active_profile = profile or detect_profile() or default_profile()
+    end = time.monotonic() + max(1.0, float(timeout_s))
+    with USB_LOCK:
+        with usb1.USBContext() as ctx:
+            dev = _find_device(ctx, active_profile)
+            if dev is None:
+                raise RuntimeError(f"{active_profile.display_name} {active_profile.vid_pid_label} nao encontrado.")
+            handle = dev.open()
+            try:
+                try:
+                    handle.claimInterface(active_profile.control_interface)
+                except usb1.USBError:
+                    pass
+                while time.monotonic() < end:
+                    if stop_event is not None and stop_event.is_set():
+                        return None
+                    timeout_ms = min(250, max(1, int((end - time.monotonic()) * 1000)))
+                    try:
+                        data = bytes(
+                            handle.interruptRead(
+                                active_profile.interrupt_endpoint,
+                                active_profile.interrupt_packet_size,
+                                timeout=timeout_ms,
+                            )
+                        )
+                    except usb1.USBErrorTimeout:
+                        continue
+                    if data and any(data):
+                        return data
+                return None
+            finally:
+                try:
+                    handle.releaseInterface(active_profile.control_interface)
+                except Exception:
+                    pass
+                handle.close()
+
+
 class RadioButtonListener:
     def __init__(
         self,
@@ -658,8 +723,18 @@ class RadioButtonListener:
         self._thread: threading.Thread | None = None
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_raw: bytes | None = None
         self._last_unknown_report: bytes | None = None
         self._last_unknown_report_time = 0.0
+        # Learned remote map: {raw report hex (no spaces): action_id}
+        self._learned: dict[str, str] = {}
+
+    def set_learned_map(self, mapping: dict[str, str] | None) -> None:
+        self._learned = dict(mapping or {})
+
+    @property
+    def active_profile(self) -> DeviceProfile:
+        return self._profile
 
     @property
     def running(self) -> bool:
@@ -678,6 +753,7 @@ class RadioButtonListener:
         self._profile = profile
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_raw = None
         self._last_unknown_report = None
         self._last_unknown_report_time = 0.0
         if was_running:
@@ -697,6 +773,7 @@ class RadioButtonListener:
         self._thread = None
         self._last_bits = 0
         self._last_alt_bits = 0
+        self._last_raw = None
         self._last_unknown_report = None
         self._last_unknown_report_time = 0.0
 
@@ -726,6 +803,7 @@ class RadioButtonListener:
                     except usb1.USBErrorTimeout:
                         self._last_bits = 0
                         self._last_alt_bits = 0
+                        self._last_raw = None
                         continue
                     except usb1.USBError as exc:
                         self._on_error(f"Leitura dos botoes falhou: {exc}")
@@ -733,12 +811,24 @@ class RadioButtonListener:
 
                     if not data:
                         continue
+
+                    # 1) A remote button the user has taught (learn mode).
+                    action = self._learned.get(data.hex())
+                    if action is not None:
+                        if data != self._last_raw:
+                            self._last_raw = data
+                            label = perform_learned_action(action, self._profile)
+                            self._on_event(f"Controle: {label}", data)
+                        continue
+
+                    # 2) The built-in panel media-bit format.
                     events, self._last_bits, self._last_alt_bits = decode_button_report(
                         data,
                         self._last_bits,
                         self._last_alt_bits,
                     )
                     if events:
+                        self._last_raw = data
                         for event in events:
                             handle_media_button(event.bit, event.vk_code, self._profile)
                             self._on_event(event.label, data)
@@ -780,3 +870,12 @@ def handle_media_button(bit: int, vk_code: int, profile: DeviceProfile) -> None:
     except Exception:
         pass
     send_media_key(vk_code)
+
+
+def perform_learned_action(action_id: str, profile: DeviceProfile) -> str:
+    """Run a learned remote action and return its label (for the log)."""
+    for aid, label, bit, vk_code in LEARNABLE_ACTIONS:
+        if aid == action_id:
+            handle_media_button(bit, vk_code, profile)
+            return label
+    return action_id
