@@ -42,7 +42,7 @@ from philips_pc_link_core import (
     default_log_path,
     detect_profile,
     ensure_pc_link_mailbox,
-    find_philips_render_endpoint,
+    find_philips_render_endpoint_fast,
     export_log,
     get_start_with_windows,
     get_status,
@@ -346,7 +346,7 @@ class MainWindow(QMainWindow):
         if self.media_monitor.last_error:
             self.log(self.media_monitor.last_error)
         self.software_volume = SoftwareVolume(
-            lambda: find_philips_render_endpoint(self.pc_link_host.profile),
+            find_philips_render_endpoint_fast,
             on_status=self.bridge.log.emit,
         )
         self.software_volume.set_enabled(self.soft_volume_checkbox.isChecked())

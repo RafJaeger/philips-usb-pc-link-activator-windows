@@ -37,7 +37,10 @@ from sound_agent import (
 
 OK = 0x82
 FAIL = 0x81
-MAX_TEXT_CHARS = 0x25  # PhilipsRemote truncates every name to 37 characters.
+# PhilipsRemote truncates names to 37 characters, but a real FWM589 freezes
+# its display when a text frame carries more than 16 characters. Every text
+# sent to the unit is therefore limited to 16.
+MAX_TEXT_CHARS = 16
 
 COMMAND_NAMES: dict[int, str] = {
     0x01: "SET_PC_PLAY",
@@ -165,12 +168,15 @@ def display_text(value: str | None, limit: int = MAX_TEXT_CHARS) -> str:
     return text[:limit].rstrip()
 
 
+MAX_LINE_CHARS = 80  # full scrolling line; only windows of it reach the unit
+
+
 def display_line(info: "MediaInfo") -> str:
-    """Text for the unit's display (GET_PC_CURSOR_TEXT): 'Title - Artist'."""
-    title = display_text(info.title)
-    artist = display_text(info.artist)
+    """Full display line 'Title - Artist' (scrolled through the display)."""
+    title = display_text(info.title, MAX_LINE_CHARS)
+    artist = display_text(info.artist, MAX_LINE_CHARS)
     if title and artist:
-        return display_text(f"{title} - {artist}")
+        return display_text(f"{title} - {artist}", MAX_LINE_CHARS)
     return title or artist
 
 
@@ -548,13 +554,14 @@ class PcLinkSession:
         width_changed = self.display.configure(self._display_width())
         line = display_line(media) if self._display_enabled() else ""
         text_changed = self.display.set_text(line, now)
-        track_changed = media.track_key != self.state.last_track_key
+        # Players often toggle the album field while a song plays, so only a
+        # change of the shown text (or width) is announced to the unit.
         first_snapshot = self.state.last_track_key is None
         self.state.last_track_key = media.track_key
         if first_snapshot and not refresh:
             return [message for message in messages if message]
 
-        if refresh or text_changed or width_changed or (track_changed and line):
+        if refresh or text_changed or width_changed:
             label = line or "(visor limpo)"
             messages.append(
                 self._event(handle, bytes((0x02, EVENT_CHANGES, TRACK_CHANGE_MASK)), f"visor: {label}")

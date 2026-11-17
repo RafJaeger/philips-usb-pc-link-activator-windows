@@ -92,7 +92,8 @@ def session(host=None, **kwargs) -> PcLinkSession:
 class TextTests(unittest.TestCase):
     def test_display_text_is_ascii_without_quotes_and_truncated(self):
         self.assertEqual(display_text('Água "de" Março'), "Agua de Marco")
-        self.assertEqual(len(display_text("x" * 80)), 37)
+        # A real FWM589 freezes above 16 characters per text frame.
+        self.assertEqual(len(display_text("x" * 80)), 16)
         self.assertEqual(display_text("  a \n b "), "a b")
         self.assertEqual(display_text(None), "")
 
@@ -100,7 +101,7 @@ class TextTests(unittest.TestCase):
         self.assertEqual(text_frame(0x40, "Song"), bytes((6, 0x40, 0x82)) + b"Song")
         self.assertEqual(text_frame(0x41, ""), bytes((2, 0x41, 0x81)))
         frame = text_frame(0x40, "y" * 80)
-        self.assertEqual(len(frame), 40)
+        self.assertEqual(len(frame), 19)
         self.assertEqual(frame[0] + 1, len(frame))
 
     def test_request_detection_excludes_sound_agent_and_status(self):
@@ -364,8 +365,24 @@ class DisplayTests(unittest.TestCase):
         width = {"value": 8}
         item = session(FakeHost(MediaInfo(title="Andromeda", artist="Gorillaz")), display_width=lambda: width["value"])
         self.assertEqual(item.current_display(), "Andromed")
-        width["value"] = 37
-        self.assertEqual(item.current_display(), "Andromeda - Gorillaz")
+        width["value"] = 37  # clamped to the 16-character limit
+        self.assertEqual(item.current_display(), "Andromeda - Gori")
+        self.assertEqual(len(text_frame(0x40, item.current_display(), exact=True)), 19)
+
+
+class AlbumFlapTests(unittest.TestCase):
+    def test_album_toggling_does_not_spam_the_unit(self):
+        host = FakeHost(MediaInfo(title="Broken", artist="Gorillaz", album="", status="playing"))
+        handle = FakeHandle()
+        item = session(host)
+        item.handle_request(handle, bytes.fromhex("80 4a"))
+        item.poll_events(handle)
+        handle.writes.clear()
+        for album in ("Plastic Beach", "", "Plastic Beach"):
+            host.info = MediaInfo(title="Broken", artist="Gorillaz", album=album, status="playing")
+            self.assertEqual(item.poll_events(handle), [])
+        self.assertEqual([f for f in handle.frames() if f != bytes.fromhex("02 A1 02")], [])
+        self.assertTrue(all("visor" not in m for m in item.poll_events(handle)))
 
 
 class ListenerTests(unittest.TestCase):

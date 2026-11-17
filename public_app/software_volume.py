@@ -77,7 +77,7 @@ class SoftwareVolume:
         self,
         find_endpoint: Callable[[], object | None],
         *,
-        poll_s: float = 0.2,
+        poll_s: float = 0.1,
         on_status: Callable[[str], None] | None = None,
     ) -> None:
         self._find_endpoint = find_endpoint
@@ -129,14 +129,21 @@ class SoftwareVolume:
         comtypes.CoInitialize()
         device = None
         next_lookup = 0.0
+        revalidate_at = 0.0
         restored = True
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
                 try:
-                    if device is None or now >= next_lookup:
+                    # The lookup is cached: volume changes must be followed
+                    # within a fraction of a second.
+                    if device is None and now >= next_lookup:
                         device = self._find_endpoint()
-                        next_lookup = now + 3.0
+                        next_lookup = now + (2.0 if device is None else 0.0)
+                        revalidate_at = now + 30.0
+                    elif device is not None and now >= revalidate_at:
+                        device = self._find_endpoint() or device
+                        revalidate_at = now + 30.0
                     if device is None:
                         self.last_gain = None
                     elif self._enabled.is_set():

@@ -526,7 +526,75 @@ def _send_pc_link_enable(active_profile: DeviceProfile, family: str) -> str:
                 handle.close()
 
 
+_FRIENDLY_NAME_KEY = ("{a45c254e-df1c-4efd-8020-67d146a850e0}", 14)  # PKEY_Device_FriendlyName
+
+
+class LightEndpoint:
+    """Render endpoint without pycaw's full property dump (that takes seconds)."""
+
+    def __init__(self, dev, endpoint_id: str, friendly_name: str) -> None:
+        self._dev = dev
+        self.id = endpoint_id
+        self.FriendlyName = friendly_name
+        self._volume = None
+        self._sessions = None
+
+    @property
+    def EndpointVolume(self):
+        if self._volume is None:
+            from pycaw.pycaw import IAudioEndpointVolume
+
+            iface = self._dev.Activate(IAudioEndpointVolume._iid_, comtypes.CLSCTX_ALL, None)
+            self._volume = iface.QueryInterface(IAudioEndpointVolume)
+        return self._volume
+
+    @property
+    def AudioSessionManager(self):
+        if self._sessions is None:
+            from pycaw.pycaw import IAudioSessionManager2
+
+            iface = self._dev.Activate(IAudioSessionManager2._iid_, comtypes.CLSCTX_ALL, None)
+            self._sessions = iface.QueryInterface(IAudioSessionManager2)
+        return self._sessions
+
+
+def _endpoint_friendly_name(dev) -> str:
+    from pycaw.api.mmdeviceapi.depend.structures import PROPERTYKEY
+
+    store = dev.OpenPropertyStore(0)  # STGM_READ
+    key = PROPERTYKEY()
+    key.fmtid = comtypes.GUID(_FRIENDLY_NAME_KEY[0])
+    key.pid = _FRIENDLY_NAME_KEY[1]
+    value = store.GetValue(key)
+    try:
+        return str(value.GetValue() or "")
+    finally:
+        value.clear()
+
+
+def find_philips_render_endpoint_fast() -> LightEndpoint | None:
+    """Active render endpoint named 'Philips Audio Set', in milliseconds."""
+    comtypes.CoInitialize()
+    enumerator = AudioUtilities.GetDeviceEnumerator()
+    collection = enumerator.EnumAudioEndpoints(0, 1)  # eRender, DEVICE_STATE_ACTIVE
+    for index in range(collection.GetCount()):
+        dev = collection.Item(index)
+        try:
+            name = _endpoint_friendly_name(dev)
+        except Exception:  # noqa: BLE001
+            continue
+        if "Philips Audio Set" in name:
+            return LightEndpoint(dev, dev.GetId(), name)
+    return None
+
+
 def find_philips_render_endpoint(profile: DeviceProfile | None = None):
+    try:
+        device = find_philips_render_endpoint_fast()
+        if device is not None:
+            return device
+    except Exception:  # noqa: BLE001 - fall back to the full (slow) scan
+        pass
     active_profile = profile or detect_profile() or default_profile()
     audio_id = active_profile.audio_hardware_prefix.upper()
     comtypes.CoInitialize()
