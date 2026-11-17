@@ -233,6 +233,67 @@ def _run_powershell(script: str, elevated: bool = False) -> subprocess.Completed
     )
 
 
+def run_elevated_script(script: Path, arguments: list[str], *, label: str) -> tuple[int, str]:
+    """Run a .ps1 as administrator (UAC) and return (exit code, its output)."""
+    temp = Path(os.environ.get("TEMP", str(Path.home())))
+    log = temp / f"philips_pc_link_{label}.log"
+    wrapper = temp / f"philips_pc_link_{label}.ps1"
+    # Parameter names (-Installer, -Remove) stay bare; values are quoted.
+    quoted = " ".join(
+        str(arg) if str(arg).startswith("-") else "'" + str(arg).replace("'", "''") + "'"
+        for arg in arguments
+    )
+    wrapper.write_text(
+        "$ErrorActionPreference = 'Continue'\r\n"
+        f"try {{ & '{script}' {quoted} *>&1 | Out-File -FilePath '{log}' -Encoding utf8; exit 0 }}\r\n"
+        f"catch {{ ('ERRO: ' + $_.Exception.Message) | Out-File -FilePath '{log}' -Append -Encoding utf8; exit 1 }}\r\n",
+        encoding="utf-8-sig",
+    )
+    if log.exists():
+        log.unlink()
+    command = [
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
+        f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{wrapper}\"'; exit $p.ExitCode",
+    ]
+    result = subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_hidden_subprocess_options(),
+    )
+    output = log.read_text(encoding="utf-8-sig", errors="replace") if log.exists() else ""
+    if result.returncode != 0 and not output:
+        output = (result.stdout + "\n" + result.stderr).strip() or "Permissao de administrador negada."
+    return result.returncode, output.strip()
+
+
+EQUALIZER_INSTALLER = ("vendor", "equalizerapo", "EqualizerAPO-x64-1.4.2.exe")
+
+
+def equalizer_installer_path() -> Path:
+    return app_root().joinpath(*EQUALIZER_INSTALLER)
+
+
+def install_equalizer() -> str:
+    """Install Equalizer APO (bundled) and enable it on the Philips output."""
+    script = app_root() / "scripts" / "install-equalizer.ps1"
+    installer = equalizer_installer_path()
+    if not installer.exists():
+        raise FileNotFoundError(f"Instalador do Equalizer APO ausente: {installer}")
+    code, output = run_elevated_script(script, ["-Installer", str(installer)], label="equalizer")
+    if code != 0:
+        raise RuntimeError(output or "Falha ao ativar o equalizador.")
+    return output
+
+
+def remove_equalizer() -> str:
+    """Restore the Philips output (Equalizer APO stays installed)."""
+    script = app_root() / "scripts" / "install-equalizer.ps1"
+    code, output = run_elevated_script(script, ["-Remove"], label="equalizer")
+    if code != 0:
+        raise RuntimeError(output or "Falha ao remover o equalizador.")
+    return output
+
+
 def _profile_instance_filter(profile: DeviceProfile) -> str:
     return f"VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}"
 

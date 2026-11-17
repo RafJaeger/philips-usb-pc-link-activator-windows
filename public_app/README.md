@@ -133,6 +133,35 @@ protocol. `80 4a` (`GET_PC_PLAYER1_STATUS`, repeated while the stereo looks
 for PC software) is answered, never ignored or learned as a button. Only
 `80 80` remains an autonomous status report.
 
+## Interface (0.6.0)
+
+The window follows the look of the early-2000s FWM micro systems: brushed
+aluminium header with a status LED, a blue back-lit LCD that mirrors the
+stereo display, graphite panels and chrome buttons. Navigation is a large
+sidebar (Inicio, Visor, Som, Controle, Configuracoes, Log) plus a complete
+menu bar with every option. The home page is a 3-step checklist (WinUSB
+driver, PC Link active, stereo as Windows output), each step with its button.
+
+## Display Modes
+
+Modes: music (title and artist as separate pages), clock, PC (CPU/RAM),
+internet (download/upload), free text, and auto (all in turn). The stereo's
+two playlist buttons (`80 14` / `80 15`) switch modes. Only the music (and a
+long free text) scrolls; clock, PC, internet and notices stay still. Notices
+(VOL xx%, MUDO, PAUSA, PLAY, mode names) appear at once.
+
+## Equalizer and Tone
+
+- Tone of the stereo itself: bass and treble (-12..+12 dB) and AGC of the
+  UAC3553B, set through Windows (IAudioBass/IAudioTreble). No install needed.
+- Sound Agent 2 style equalizer: 10 bands (31 Hz-16 kHz), Rock/Pop/Jazz/
+  Classic and more presets, user presets and VBass. Processed by Equalizer APO
+  (GPL-2.0), bundled and installed by "Ativar equalizador" only on the Philips
+  Audio Set output (same registry changes as its Device Selector, with the
+  original values backed up; ownership is taken only if Windows denies the
+  write, and the original owner/permissions are restored). If that still
+  fails, Equalizer APO's own Device Selector opens as a fallback.
+
 ## Song Title on the Display
 
 Enable `Mostrar musica no visor do radio` (on by default). The control channel

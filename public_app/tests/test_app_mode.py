@@ -97,8 +97,11 @@ class AppModeTests(unittest.TestCase):
             app.MainWindow.poll_status,
             app.MediaMonitor,
             app.SoftwareVolume,
+            app.find_philips_render_endpoint_fast,
         )
         app.QSettings = FakeSettings
+        # Never touch the real Philips chip from the tests.
+        app.find_philips_render_endpoint_fast = lambda: None
         app.RadioButtonListener = FakeListener
         app.get_start_with_windows = lambda: False
         app.detect_profile = lambda: None
@@ -115,6 +118,7 @@ class AppModeTests(unittest.TestCase):
             app.MainWindow.poll_status,
             app.MediaMonitor,
             app.SoftwareVolume,
+            app.find_philips_render_endpoint_fast,
         ) = self.originals
 
     def test_mcm_selection_is_persisted_and_used_for_activation(self):

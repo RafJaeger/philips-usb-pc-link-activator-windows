@@ -139,6 +139,8 @@ TRACK_CHANGE_MASK = CHANGE_TRACK_NAME
 
 # The FWM589 display shows 8 characters and does not scroll by itself.
 DEFAULT_DISPLAY_WIDTH = 8
+# A FWM589 follows about three display changes per second.
+MIN_DISPLAY_INTERVAL_S = 0.3
 PLAYER_STATE_CODES = {"stopped": 0x00, "playing": 0x01, "paused": 0x04, "finished": 0x05}
 
 # Version reported for GET_PC_PLAYER_VERSION, as BCD: the MusicMatch
@@ -292,6 +294,9 @@ class PcLinkState:
     mailbox_ready: bool = False
     refresh_pending: bool = False
     last_track_key: tuple[str, str, str] | None = None
+    last_window: str | None = None
+    last_line: str | None = None
+    last_display_event: float = -1e9
     last_player_state: int | None = None
     # Last value sent with each PC event (A1-A8); GET_PC_PLAYER1_STATE reads it.
     event_values: dict[int, int] = field(default_factory=dict)
@@ -310,6 +315,7 @@ class PcLinkSession:
         ensure_mailbox: Callable[[object], list[str]] | None = None,
         display_enabled: Callable[[], bool] = lambda: True,
         display_width: Callable[[], int] = lambda: DEFAULT_DISPLAY_WIDTH,
+        composer=None,
         timeout_ms: int = 1000,
         ready_timeout_s: float = 1.25,
         sleep: Callable[[float], None] = time.sleep,
@@ -321,6 +327,9 @@ class PcLinkSession:
         self._display_enabled = display_enabled
         self._display_width = display_width
         self.display = DisplayScroller()
+        # display_modes.DisplayComposer: modes, effects and notices. Without
+        # it the session shows the plain scrolling 'Title - Artist' line.
+        self.composer = composer
         self._timeout_ms = timeout_ms
         self._ready_timeout_s = ready_timeout_s
         self._sleep = sleep
@@ -468,6 +477,13 @@ class PcLinkSession:
         if command == 0x49:
             self.state.driver_ready = True
             return "PC pronto", None, True
+        if command in (0x14, 0x15) and self.composer is not None:
+            # The stereo's two playlist buttons switch what the display shows
+            # (there are no playlists on the Windows side).
+            now = self._monotonic()
+            mode = self.composer.next_mode(now) if command == 0x14 else self.composer.previous_mode(now)
+            self.state.refresh_pending = True
+            return f"visor no modo {mode}", None, True
         if command in FIXED_FAILURES:
             return "", FIXED_FAILURES[command], True
 
@@ -551,6 +567,9 @@ class PcLinkSession:
         refresh = self.state.refresh_pending
         self.state.refresh_pending = False
         now = self._monotonic()
+        if self.composer is not None:
+            messages.extend(self._poll_composer(handle, media, now, refresh))
+            return [message for message in messages if message]
         width_changed = self.display.configure(self._display_width())
         line = display_line(media) if self._display_enabled() else ""
         text_changed = self.display.set_text(line, now)
@@ -574,9 +593,34 @@ class PcLinkSession:
                 messages.append(message)
         return [message for message in messages if message]
 
+    def _poll_composer(self, handle, media: MediaInfo, now: float, refresh: bool) -> list[str]:
+        """Announce every new display window (rate limited) to the unit."""
+        messages: list[str] = []
+        self.composer.observe_media(media, now)
+        window = self.current_display(media)
+        line = display_line(media)
+        if line != self.state.last_line:
+            if self.state.last_line is not None and line:
+                messages.append(f"PC Link: musica no visor: {line}")
+            self.state.last_line = line
+        changed = window != self.state.last_window
+        due = now - self.state.last_display_event >= MIN_DISPLAY_INTERVAL_S
+        if refresh or (changed and due):
+            message = self._event(handle, bytes((0x02, EVENT_CHANGES, TRACK_CHANGE_MASK)), "visor")
+            self.state.last_window = window
+            self.state.last_display_event = now
+            # Steps happen several times per second: log failures only.
+            if refresh or "falha" in message or "pausadas" in message:
+                messages.append(message)
+        return messages
+
     def current_display(self, media: MediaInfo | None = None) -> str:
         """Window of the display line the unit should show right now."""
         info = media or self._media()
+        if self.composer is not None:
+            if not self._display_enabled():
+                return "PC LINK"
+            return self.composer.window(self._monotonic(), info, self._display_width())
         self.display.configure(self._display_width())
         line = display_line(info) if self._display_enabled() else ""
         self.display.set_text(line, self._monotonic())

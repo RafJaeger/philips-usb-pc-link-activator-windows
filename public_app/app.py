@@ -6,8 +6,8 @@ import threading
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QTimer, Signal, QObject, QSettings, QEventLoop
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QTimer, Signal, QObject, QSettings, QEventLoop, Qt
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,7 +16,9 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -24,14 +26,23 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
+    QTabWidget,
+    QButtonGroup,
+    QFrame,
+    QScrollArea,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from display_modes import EFFECT_NAMES, EFFECTS, MODE_NAMES, MODES, DisplayComposer
 from media_session import MediaMonitor
 from software_volume import SoftwareVolume
+from tone_control import ChipTone
+from ui_equalizer import EqualizerPanel
 from pc_link_protocol import DEFAULT_DISPLAY_WIDTH, MAX_TEXT_CHARS, PcLinkSession, display_text
+from theme import STYLESHEET, HeaderBar, LcdPanel, StepRow, page_title
 from philips_pc_link_core import (
     LEARNABLE_ACTIONS,
     RadioButtonListener,
@@ -46,7 +57,9 @@ from philips_pc_link_core import (
     export_log,
     get_start_with_windows,
     get_status,
+    install_equalizer,
     install_winusb_driver,
+    remove_equalizer,
     restore_control_driver,
     set_default_output,
     set_start_with_windows,
@@ -86,13 +99,15 @@ class Bridge(QObject):
     capture_done = Signal()
     sound_agent_window = Signal(bool)
     mcm_retry = Signal(int)
+    display_mode = Signal(str)
+    equalizer_done = Signal()
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Philips USB PC Link Activator for Windows")
-        self.resize(860, 620)
+        self.resize(1120, 860)
         self.app_icon = QIcon(str(app_root() / "assets" / "app.ico"))
         self.setWindowIcon(self.app_icon)
 
@@ -104,8 +119,13 @@ class MainWindow(QMainWindow):
         self.bridge.sound_agent_window.connect(self.set_sound_agent_window)
         self.bridge.mcm_retry.connect(self.schedule_mcm_retry)
 
-        self.title_label = QLabel("Philips USB PC Link Activator for Windows")
-        self.title_label.setObjectName("titleLabel")
+        self.header = HeaderBar(
+            "USB PC Link Activator",
+            "MICRO HI-FI  ·  FWM / FWC / MCM  ·  WINDOWS 10 / 11",
+            f"v{app_version()}",
+        )
+        self.title_label = self.header.title
+        self.lcd = LcdPanel()
         self.profile_label = QLabel("Perfil: detectando aparelho USB PC Link...")
         self.profile_label.setObjectName("profileLabel")
         self.status_label = QLabel("Verificando Philips Audio Set...")
@@ -133,8 +153,29 @@ class MainWindow(QMainWindow):
         self.auto_checkbox.setChecked(True)
         self.startup_checkbox = QCheckBox("Iniciar com o Windows")
         self.startup_checkbox.setChecked(get_start_with_windows())
-        self.display_checkbox = QCheckBox("Mostrar musica no visor do radio")
+        self.display_checkbox = QCheckBox("Usar o visor do radio")
         self.display_checkbox.setChecked(self._setting_bool("show_title", True))
+        self.mode_combo = QComboBox()
+        for mode in MODES:
+            self.mode_combo.addItem(MODE_NAMES[mode], mode)
+        self.effect_combo = QComboBox()
+        for effect in EFFECTS:
+            self.effect_combo.addItem(EFFECT_NAMES[effect], effect)
+        saved_effect = str(self.settings.value("display_effect", "scroll"))
+        effect_index = self.effect_combo.findData(saved_effect)
+        self.effect_combo.setCurrentIndex(effect_index if effect_index >= 0 else 0)
+        self.free_text_edit = QLineEdit(str(self.settings.value("display_text", "") or ""))
+        self.free_text_edit.setMaxLength(80)
+        self.free_text_edit.setPlaceholderText("Texto livre para o modo Texto (ex.: BOA NOITE)")
+        self.notices_checkbox = QCheckBox("Avisos no visor (volume, mudo, pausa)")
+        self.notices_checkbox.setChecked(self._setting_bool("display_notices", True))
+        self.display_hint = QLabel(
+            "Os 2 botoes de playlist do radio (proxima/anterior) trocam o modo do visor."
+        )
+        self.display_hint.setObjectName("hintLabel")
+        self.display_preview = QLabel("-" * 8)
+        self.display_preview.setToolTip("O que o visor do radio esta mostrando agora")
+        self.display_preview.setObjectName("displayPreview")
         self.width_spin = QSpinBox()
         self.width_spin.setRange(4, MAX_TEXT_CHARS)
         self.width_spin.setSuffix(" caracteres")
@@ -166,124 +207,172 @@ class MainWindow(QMainWindow):
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
 
-        actions = QHBoxLayout()
-        actions.addWidget(self.install_button)
-        actions.addWidget(self.activate_button)
-        actions.addWidget(self.default_button)
+        # ===== Pages =====
+        self.equalizer_panel = EqualizerPanel(self.settings, chip_tone_factory=self._chip_tone)
+        self.equalizer_panel.install_requested.connect(self.install_equalizer_now)
+        self.equalizer_panel.remove_requested.connect(self.remove_equalizer_now)
+        self.equalizer_panel.message.connect(self.log)
+        self.bridge.equalizer_done.connect(self.equalizer_panel.refresh_status)
 
-        advanced = QHBoxLayout()
-        advanced.addWidget(self.learn_button)
-        advanced.addWidget(self.log_button)
-        advanced.addWidget(self.restore_button)
-        advanced.addWidget(self.about_button)
-        advanced.addStretch(1)
+        self.activate_button.setObjectName("bigButton")
+        self.step_driver = StepRow(1, "Driver de controle (WinUSB)", self.install_button)
+        self.step_link = StepRow(2, "USB PC Link ativo", self.activate_button)
+        self.step_output = StepRow(3, "Philips como saida de som do Windows", self.default_button)
 
-        options = QHBoxLayout()
-        options.addWidget(self.auto_checkbox)
-        options.addWidget(self.buttons_checkbox)
-        options.addWidget(self.startup_checkbox)
-        options.addStretch(1)
+        home = self._page(
+            "Inicio",
+            "Coloque o radio em PC LINK e siga os 3 passos. Quando todos estiverem verdes, e so tocar.",
+            self._card(
+                "Aparelho",
+                self.status_label,
+                self.profile_label,
+                self._field(
+                    "Modelo do aparelho", self.family_combo,
+                    "FWM/FWC: ativacao padrao. MCM: Sound Agent 2 (MCM530/570/590/595).",
+                ),
+            ),
+            self.step_driver,
+            self.step_link,
+            self.step_output,
+        )
 
-        media_options = QHBoxLayout()
-        media_options.addWidget(self.display_checkbox)
-        media_options.addWidget(QLabel("Visor:"))
-        media_options.addWidget(self.width_spin)
-        media_options.addSpacing(16)
-        media_options.addWidget(QLabel("Botoes de volume:"))
-        media_options.addWidget(self.volume_combo)
-        media_options.addStretch(1)
+        display = self._page(
+            "Visor do radio",
+            "O que aparece no visor do aparelho. Os 2 botoes de playlist do radio tambem trocam o modo.",
+            self._card(
+                "Conteudo",
+                self.display_checkbox,
+                self._field(
+                    "Modo", self.mode_combo,
+                    "Musica (titulo e artista), relogio, CPU/RAM, internet, texto livre ou tudo alternando.",
+                ),
+                self._field(
+                    "Efeito da musica", self.effect_combo,
+                    "Como o titulo entra quando nao cabe no visor. Relogio, PC e avisos ficam parados.",
+                ),
+                self._field("Texto livre", self.free_text_edit, "Usado no modo Texto livre."),
+            ),
+            self._card(
+                "Ajustes",
+                self._field(
+                    "Largura do visor", self.width_spin,
+                    "FWM589: 8 caracteres. Acima de 16 o visor do aparelho trava, por isso o limite.",
+                ),
+                self.notices_checkbox,
+                self.now_playing_label,
+            ),
+        )
 
-        device_box = QGroupBox("Aparelho")
-        device_box.setObjectName("panel")
-        device_layout = QVBoxLayout()
-        device_layout.addWidget(self.profile_label)
-        family_row = QHBoxLayout()
-        family_row.addWidget(QLabel("Modelo / protocolo:"))
-        family_row.addWidget(self.family_combo, 1)
-        device_layout.addLayout(family_row)
-        device_layout.addWidget(self.status_label)
-        device_layout.addLayout(actions)
-        device_box.setLayout(device_layout)
+        sound = self._page(
+            "Som",
+            "Volume do Windows na saida Philips, equalizador do Sound Agent e o tom do proprio radio.",
+            self._card(
+                "Volume",
+                self.soft_volume_checkbox,
+                self._field(
+                    "Botoes de volume do radio", self.volume_combo,
+                    "Volume do Windows mostra o indicador na tela, como uma tecla de volume.",
+                ),
+            ),
+            self.equalizer_panel,
+        )
 
-        controls_box = QGroupBox("Controles")
-        controls_box.setObjectName("panel")
-        controls_layout = QVBoxLayout()
-        controls_layout.addLayout(options)
-        controls_layout.addLayout(media_options)
-        controls_layout.addWidget(self.soft_volume_checkbox)
-        controls_layout.addWidget(self.now_playing_label)
-        controls_layout.addLayout(advanced)
-        controls_box.setLayout(controls_layout)
+        self.learn_button.setMinimumWidth(240)
+        self.restore_button.setMinimumWidth(240)
+        control = self._page(
+            "Controle",
+            "Botoes do painel e do controle remoto do radio no PC.",
+            self._card(
+                "Botoes do radio",
+                self.buttons_checkbox,
+                self._hint("Play/pause, parar, proxima, anterior, mudo e volume viram comandos do Windows."),
+            ),
+            self._card(
+                "Controle remoto",
+                self._row(self.learn_button, self._hint("Ensina ao app os codigos do seu controle, botao por botao.")),
+            ),
+            self._card(
+                "Avancado",
+                self._row(self.restore_button, self._hint("Devolve a interface de controle ao driver HID do Windows.")),
+            ),
+        )
+
+        self.log_button.setMinimumWidth(200)
+        self.about_button.setMinimumWidth(200)
+        settings_page = self._page(
+            "Configuracoes",
+            "Como o app se comporta no dia a dia.",
+            self._card(
+                "Inicializacao",
+                self.auto_checkbox,
+                self._hint("Ativa o PC Link de novo sozinho quando o radio reconecta ou volta ao PC LINK."),
+                self.startup_checkbox,
+                self._hint("Abre minimizado na bandeja quando o Windows inicia."),
+            ),
+            self._card(
+                "Suporte",
+                self._row(self.log_button, self._hint("Salva um arquivo com tudo que o app sabe do aparelho.")),
+                self._row(self.about_button, self._hint("Versao, creditos e licencas.")),
+            ),
+        )
+
+        log_page = self._page("Log", "Tudo o que o app fez nesta sessao.", self.log_box)
+
+        self.pages = QStackedWidget()
+        self.nav_buttons: list[QPushButton] = []
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(220)
+        nav_layout = QVBoxLayout()
+        nav_layout.setContentsMargins(10, 12, 10, 12)
+        nav_layout.setSpacing(6)
+        nav_group = QButtonGroup(self)
+        nav_group.setExclusive(True)
+        pages = (
+            ("⌂   Inicio", home),
+            ("▣   Visor", display),
+            ("♫   Som", sound),
+            ("◎   Controle", control),
+            ("⚙   Configuracoes", settings_page),
+            ("☰   Log", log_page),
+        )
+        for index, (label, page) in enumerate(pages):
+            self.pages.addWidget(page)
+            button = QPushButton(label)
+            button.setObjectName("navButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, i=index: self.show_page(i))
+            nav_group.addButton(button)
+            nav_layout.addWidget(button)
+            self.nav_buttons.append(button)
+        nav_layout.addStretch(1)
+        version = QLabel(f"versao {app_version()}")
+        version.setObjectName("fieldHelp")
+        version.setAlignment(Qt.AlignCenter)
+        nav_layout.addWidget(version)
+        sidebar.setLayout(nav_layout)
+        self.nav_buttons[0].setChecked(True)
+
+        content = QVBoxLayout()
+        content.setSpacing(10)
+        content.addWidget(self.lcd)
+        content.addWidget(self.pages, 1)
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        body.addWidget(sidebar)
+        body.addLayout(content, 1)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.title_label)
-        layout.addWidget(device_box)
-        layout.addWidget(controls_box)
-        layout.addWidget(self.log_box, 1)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(10)
+        layout.addWidget(self.header)
+        layout.addLayout(body, 1)
 
         root = QWidget()
         root.setLayout(layout)
         self.setCentralWidget(root)
 
-        self.setStyleSheet(
-            """
-            QMainWindow { background: #111318; color: #f3f4f6; }
-            QLabel { color: #f3f4f6; font-size: 14px; }
-            #titleLabel {
-                font-size: 24px;
-                font-weight: 700;
-                padding: 6px 2px;
-            }
-            #profileLabel { color: #cbd5e1; }
-            #nowPlayingLabel { color: #93c5fd; padding: 2px 2px; }
-            #statusLabel {
-                background: #1c212b;
-                border: 1px solid #303847;
-                border-radius: 6px;
-                padding: 12px;
-                font-weight: 600;
-            }
-            QPushButton {
-                background: #2563eb;
-                color: white;
-                border: 0;
-                border-radius: 6px;
-                padding: 10px 14px;
-                font-weight: 600;
-            }
-            QPushButton:disabled { background: #4b5563; color: #cbd5e1; }
-            QCheckBox { color: #e5e7eb; spacing: 8px; }
-            QComboBox {
-                background: #1c212b;
-                color: #f3f4f6;
-                border: 1px solid #303847;
-                border-radius: 5px;
-                padding: 7px 9px;
-            }
-            QGroupBox#panel {
-                color: #cbd5e1;
-                border: 1px solid #303847;
-                border-radius: 8px;
-                margin-top: 12px;
-                padding: 14px 10px 10px 10px;
-                font-weight: 600;
-            }
-            QGroupBox#panel::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 6px;
-            }
-            QTextEdit {
-                background: #0b0d12;
-                color: #d1d5db;
-                border: 1px solid #303847;
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }
-            """
-        )
+        self.setStyleSheet(STYLESHEET)
 
         self.install_button.clicked.connect(self.install_driver)
         self.activate_button.clicked.connect(self.activate_now)
@@ -305,12 +394,27 @@ class MainWindow(QMainWindow):
         self._display_width = self.width_spin.value()
         self.media_monitor = MediaMonitor()
         self.pc_link_host = WindowsPcLinkHost(self.media_monitor, initial_profile)
+        self.display = DisplayComposer()
+        self.display.set_free_text(self.free_text_edit.text(), time.monotonic())
+        self.display.set_effect(self.selected_effect())
+        self.display.notices_enabled = self.notices_checkbox.isChecked()
+        saved_mode = str(self.settings.value("display_mode", "music"))
+        self.display.set_mode(saved_mode, time.monotonic(), announce=False)
+        self._select_mode_in_combo(self.display.mode)
+        # The stereo's playlist buttons change the mode from the USB thread.
+        self.display.on_mode_change = self.bridge.display_mode.emit
+        self.bridge.display_mode.connect(self.on_display_mode_from_radio)
         self.pc_link = PcLinkSession(
             self.pc_link_host,
             ensure_mailbox=ensure_pc_link_mailbox,
             display_enabled=lambda: self._show_title,
             display_width=lambda: self._display_width,
+            composer=self.display,
         )
+        self.mode_combo.currentIndexChanged.connect(self.on_display_mode_changed)
+        self.effect_combo.currentIndexChanged.connect(self.on_display_effect_changed)
+        self.free_text_edit.textChanged.connect(self.on_free_text_changed)
+        self.notices_checkbox.stateChanged.connect(self.on_notices_changed)
         self.radio_listener = RadioButtonListener(
             self.on_radio_button,
             self.on_button_error,
@@ -348,14 +452,226 @@ class MainWindow(QMainWindow):
         self.software_volume = SoftwareVolume(
             find_philips_render_endpoint_fast,
             on_status=self.bridge.log.emit,
+            on_level=self.on_windows_volume_level,
         )
         self.software_volume.set_enabled(self.soft_volume_checkbox.isChecked())
         self.now_playing_timer = QTimer(self)
         self.now_playing_timer.timeout.connect(self.refresh_now_playing)
-        self.now_playing_timer.start(1500)
+        self.now_playing_timer.start(300)
 
+        self.setup_menus()
         self.poll_status()
         self.sync_button_listener()
+
+    # ----- menu bar -----
+
+    def _menu_check(self, menu, text: str, checkbox: QCheckBox) -> QAction:
+        action = QAction(text, self)
+        action.setCheckable(True)
+        action.triggered.connect(lambda checked: checkbox.setChecked(checked))
+        menu.aboutToShow.connect(lambda: action.setChecked(checkbox.isChecked()))
+        menu.addAction(action)
+        return action
+
+    def _menu_button(self, menu, text: str, slot, button: QWidget | None = None) -> QAction:
+        action = QAction(text, self)
+        action.triggered.connect(lambda _checked=False: slot())
+        if button is not None:
+            menu.aboutToShow.connect(lambda: action.setEnabled(button.isEnabled()))
+        menu.addAction(action)
+        return action
+
+    def _menu_choices(self, menu, title: str, combo: QComboBox) -> None:
+        """Submenu mirroring a combo box (rebuilt when opened, so always current)."""
+        submenu = menu.addMenu(title)
+
+        def rebuild() -> None:
+            submenu.clear()
+            group = QActionGroup(submenu)
+            for index in range(combo.count()):
+                action = QAction(combo.itemText(index), submenu)
+                action.setCheckable(True)
+                action.setChecked(index == combo.currentIndex())
+                action.triggered.connect(lambda _checked=False, i=index: combo.setCurrentIndex(i))
+                group.addAction(action)
+                submenu.addAction(action)
+
+        submenu.aboutToShow.connect(rebuild)
+        rebuild()
+
+    def setup_menus(self) -> None:
+        bar = self.menuBar()
+        bar.clear()
+
+        file_menu = bar.addMenu("&Arquivo")
+        for index, name in enumerate(("Inicio", "Visor", "Som", "Controle", "Configuracoes", "Log")):
+            self._menu_button(file_menu, f"Ir para {name}", lambda i=index: self.show_page(i))
+        file_menu.addSeparator()
+        self._menu_button(file_menu, "Gerar log de suporte...", self.export_log_now, self.log_button)
+        file_menu.addSeparator()
+        self._menu_button(file_menu, "Minimizar para a bandeja", self.hide)
+        self._menu_button(file_menu, "Sair", self.quit_from_tray)
+
+        device_menu = bar.addMenu("A&parelho")
+        self._menu_button(device_menu, "Ativar PC Link agora", self.activate_now, self.activate_button)
+        self._menu_button(device_menu, "Instalar driver WinUSB", self.install_driver, self.install_button)
+        self._menu_button(device_menu, "Usar o radio como saida de som", self.set_default_output_now, self.default_button)
+        device_menu.addSeparator()
+        self._menu_choices(device_menu, "Modelo do aparelho", self.family_combo)
+        self._menu_check(device_menu, "Reativar automaticamente", self.auto_checkbox)
+        device_menu.addSeparator()
+        self._menu_button(device_menu, "Restaurar controle HID do Windows", self.restore_control_driver_now, self.restore_button)
+
+        display_menu = bar.addMenu("&Visor")
+        self._menu_check(display_menu, "Usar o visor do radio", self.display_checkbox)
+        self._menu_choices(display_menu, "Modo", self.mode_combo)
+        self._menu_choices(display_menu, "Efeito da musica", self.effect_combo)
+        width_menu = display_menu.addMenu("Largura do visor")
+
+        def rebuild_widths() -> None:
+            width_menu.clear()
+            group = QActionGroup(width_menu)
+            for width in (8, 10, 12, 14, 16):
+                action = QAction(f"{width} caracteres", width_menu)
+                action.setCheckable(True)
+                action.setChecked(self.width_spin.value() == width)
+                action.triggered.connect(lambda _checked=False, w=width: self.width_spin.setValue(w))
+                group.addAction(action)
+                width_menu.addAction(action)
+
+        width_menu.aboutToShow.connect(rebuild_widths)
+        rebuild_widths()
+        self._menu_check(display_menu, "Avisos no visor (volume, mudo, pausa)", self.notices_checkbox)
+        self._menu_button(display_menu, "Editar texto livre...", self.edit_free_text)
+
+        sound_menu = bar.addMenu("&Som")
+        self._menu_check(sound_menu, "Corrigir volume do Windows na saida Philips", self.soft_volume_checkbox)
+        self._menu_choices(sound_menu, "Botoes de volume do radio", self.volume_combo)
+        sound_menu.addSeparator()
+        panel = self.equalizer_panel
+        self._menu_check(sound_menu, "Equalizador ligado", panel.enabled_checkbox)
+        self._menu_choices(sound_menu, "Predefinicao do equalizador", panel.preset_combo)
+        self._menu_button(sound_menu, "Ativar equalizador", panel.install_requested.emit, panel.install_button)
+        self._menu_button(sound_menu, "Remover equalizador da saida Philips", panel._confirm_remove, panel.remove_button)
+        sound_menu.addSeparator()
+        self._menu_button(sound_menu, "Zerar graves e agudos do radio", panel._reset_tone, panel.tone_reset)
+
+        control_menu = bar.addMenu("&Controle")
+        self._menu_check(control_menu, "Ativar botoes do radio", self.buttons_checkbox)
+        self._menu_button(control_menu, "Aprender controle remoto...", self.learn_remote_now, self.learn_button)
+
+        help_menu = bar.addMenu("Aj&uda")
+        self._menu_button(help_menu, "Como usar", self.show_help)
+        self._menu_button(help_menu, "Abrir o log", lambda: self.show_page(5))
+        help_menu.addSeparator()
+        self._menu_button(help_menu, "Sobre", self.show_about)
+
+    def edit_free_text(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "Texto livre", "Texto para o modo Texto livre do visor:", text=self.free_text_edit.text()
+        )
+        if ok:
+            self.free_text_edit.setText(text)
+
+    def show_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "Como usar",
+            "1. Ligue o radio, conecte o cabo USB e escolha PC LINK no aparelho.\n"
+            "2. Na pagina Inicio, siga os 3 passos ate todos ficarem verdes.\n"
+            "3. Toque musica no PC: ela sai pelo radio e o titulo aparece no visor.\n\n"
+            "Visor: escolha musica, relogio, PC, internet ou texto. Os 2 botoes de playlist "
+            "do radio trocam o modo.\n"
+            "Som: o volume do Windows funciona na saida Philips; o equalizador do Sound Agent "
+            "e os graves/agudos do radio ficam na pagina Som.\n"
+            "Controle: botoes do radio e do controle remoto viram comandos do Windows.",
+        )
+
+    # ----- page building blocks -----
+
+    def _page(self, title: str, subtitle: str, *widgets) -> QWidget:
+        """A scrollable page: big title, one-line explanation, then the content."""
+        inner = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 10, 6)
+        layout.setSpacing(12)
+        layout.addWidget(page_title(title, subtitle))
+        for widget in widgets:
+            layout.addWidget(widget, 1 if widget is self.log_box else 0)
+        if not any(widget is self.log_box for widget in widgets):
+            layout.addStretch(1)
+        inner.setLayout(layout)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _card(self, title: str, *widgets) -> QWidget:
+        box = QGroupBox(title)
+        box.setObjectName("panel")
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+        for widget in widgets:
+            layout.addWidget(widget)
+        box.setLayout(layout)
+        return box
+
+    def _field(self, label: str, widget: QWidget, help_text: str = "") -> QWidget:
+        holder = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(4)
+        title = QLabel(label)
+        title.setObjectName("fieldLabel")
+        layout.addWidget(title)
+        layout.addWidget(widget)
+        if help_text:
+            layout.addWidget(self._hint(help_text))
+        holder.setLayout(layout)
+        return holder
+
+    def _hint(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldHelp")
+        label.setWordWrap(True)
+        return label
+
+    def _row(self, button: QWidget, hint: QWidget) -> QWidget:
+        holder = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+        layout.addWidget(button)
+        layout.addWidget(hint, 1)
+        holder.setLayout(layout)
+        return holder
+
+    def show_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        if 0 <= index < len(self.nav_buttons):
+            self.nav_buttons[index].setChecked(True)
+
+    def _update_steps(self, status) -> None:
+        if not status.present:
+            self.step_driver.set_state("idle", "Conecte o cabo USB e coloque o radio em PC LINK.")
+        elif status.interface3_service == "WinUSB":
+            self.step_driver.set_state("done", "Instalado somente na interface de controle (MI_03).")
+        else:
+            self.step_driver.set_state("todo", "Clique para instalar. O Windows vai pedir permissao.")
+        if self._pc_link_active and status.interface3_ok:
+            self.step_link.set_state("done", "O radio esta recebendo o som do PC.")
+        elif status.interface3_ok:
+            self.step_link.set_state("todo", "Clique para ativar (o app tambem reativa sozinho).")
+        else:
+            self.step_link.set_state("idle", "Disponivel depois do passo 1.")
+        if status.default_output:
+            self.step_output.set_state("done", "O som do Windows sai pelo radio.")
+        elif status.audio_present:
+            self.step_output.set_state("todo", "Clique para mandar o som do Windows para o radio.")
+        else:
+            self.step_output.set_state("idle", "A saida de som do radio ainda nao apareceu no Windows.")
 
     def _setting_bool(self, key: str, default: bool) -> bool:
         value = self.settings.value(key, default)
@@ -379,8 +695,80 @@ class MainWindow(QMainWindow):
         enabled = self.display_checkbox.isChecked()
         self._show_title = enabled
         self.settings.setValue("show_title", enabled)
-        self.log("Musica no visor do radio: " + ("ligada." if enabled else "desligada."))
+        self.log("Visor do radio: " + ("ligado." if enabled else "desligado."))
         self.sync_button_listener()
+
+    # ----- Visor -----
+
+    def selected_effect(self) -> str:
+        return str(self.effect_combo.currentData() or "scroll")
+
+    def _select_mode_in_combo(self, mode: str) -> None:
+        index = self.mode_combo.findData(mode)
+        if index >= 0 and index != self.mode_combo.currentIndex():
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(index)
+            self.mode_combo.blockSignals(False)
+
+    def on_display_mode_changed(self, _index: int | None = None) -> None:
+        mode = str(self.mode_combo.currentData() or "music")
+        self.display.set_mode(mode, time.monotonic())
+        if self.display.mode != mode:  # e.g. Texto livre without text
+            self.log("Modo Texto livre precisa de um texto; escreva no campo abaixo.")
+            self._select_mode_in_combo(self.display.mode)
+        self.settings.setValue("display_mode", self.display.mode)
+
+    def on_display_mode_from_radio(self, mode: str) -> None:
+        self._select_mode_in_combo(mode)
+        self.settings.setValue("display_mode", mode)
+        self.log(f"Visor: modo {MODE_NAMES.get(mode, mode)} (botao do radio).")
+
+    def on_display_effect_changed(self, _index: int | None = None) -> None:
+        effect = self.selected_effect()
+        self.display.set_effect(effect)
+        self.settings.setValue("display_effect", effect)
+
+    def on_free_text_changed(self, text: str) -> None:
+        self.display.set_free_text(text, time.monotonic())
+        self.settings.setValue("display_text", text)
+        self._select_mode_in_combo(self.display.mode)
+
+    def on_notices_changed(self, _state: int | None = None) -> None:
+        enabled = self.notices_checkbox.isChecked()
+        self.display.notices_enabled = enabled
+        self.settings.setValue("display_notices", enabled)
+
+    # ----- Equalizador -----
+
+    def _chip_tone(self):
+        endpoint = find_philips_render_endpoint_fast()
+        return None if endpoint is None else ChipTone.from_endpoint(endpoint)
+
+    def install_equalizer_now(self) -> None:
+        def install_safely() -> str:
+            try:
+                return install_equalizer()
+            finally:
+                self.bridge.equalizer_done.emit()
+
+        self.run_bg(
+            "Ativando o equalizador (instala o Equalizer APO so na saida Philips). Aceite o UAC.",
+            install_safely,
+        )
+
+    def remove_equalizer_now(self) -> None:
+        def remove_safely() -> str:
+            try:
+                return remove_equalizer()
+            finally:
+                self.bridge.equalizer_done.emit()
+
+        self.run_bg("Removendo o equalizador da saida Philips. Aceite o UAC.", remove_safely)
+
+    def on_windows_volume_level(self, percent: int, muted: bool) -> None:
+        """Called from the volume thread: show VOL/MUDO on the display at once."""
+        text = "MUDO" if muted else f"VOL {percent:3d}%"
+        self.display.notify(text, time.monotonic(), 1.8)
 
     def on_software_volume_changed(self, _state: int | None = None) -> None:
         enabled = self.soft_volume_checkbox.isChecked()
@@ -403,6 +791,13 @@ class MainWindow(QMainWindow):
             text = "Tocando agora: " + " - ".join(parts) + (f"  [{state}]" if state else "")
         if self.now_playing_label.text() != text:
             self.now_playing_label.setText(text)
+        # Same characters as the stereo display (spaces kept, upper case).
+        window = self.pc_link.state.last_window if self.pc_link.state.unit_active else None
+        self.lcd.set_text(window, self._display_width)
+        self.lcd.set_indicator("PC LINK", bool(self._pc_link_active and self.pc_link.state.unit_active))
+        self.lcd.set_indicator("EQ", bool(self.equalizer_panel.last_ready))
+        self.lcd.set_indicator("PLAY", info.status == "playing")
+        self.lcd.set_indicator("PAUSA", info.status == "paused")
 
     def setup_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(self)
@@ -585,6 +980,15 @@ class MainWindow(QMainWindow):
         else:
             self.profile_label.setText("Perfil: nenhum aparelho suportado detectado")
 
+        if status.present and status.interface3_ok:
+            self.header.set_led("on", "CONECTADO")
+        elif status.present:
+            self.header.set_led("wait", "PREPARANDO")
+        else:
+            self.header.set_led("off", "DESCONECTADO")
+        self.lcd.set_indicator("USB", bool(status.present))
+        self._last_status = status
+
         driver_installed = status.interface3_service == "WinUSB"
         operation_running = self._operation_running
         can_install = bool(status.profile and status.present and not driver_installed and not operation_running)
@@ -634,6 +1038,7 @@ class MainWindow(QMainWindow):
         if ready and not was_ready:
             self.bridge.log.emit("Philips pronto.")
         self.last_ready = ready
+        self._update_steps(status)
 
         if self.auto_checkbox.isChecked() and ready and not operation_running:
             now = time.time()

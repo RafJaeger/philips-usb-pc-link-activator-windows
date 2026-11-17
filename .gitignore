@@ -19,3 +19,6 @@ public_app/.venv/
 public_app/venv/
 public_app/.idea/
 public_app/.vscode/
+
+# Third-party installers bundled at build time (downloaded by build.ps1).
+public_app/vendor/

@@ -79,10 +79,15 @@ class SoftwareVolume:
         *,
         poll_s: float = 0.1,
         on_status: Callable[[str], None] | None = None,
+        on_level: Callable[[int, bool], None] | None = None,
     ) -> None:
         self._find_endpoint = find_endpoint
         self._poll_s = poll_s
         self._on_status = on_status
+        # Called with (percent, muted) whenever the Windows level changes,
+        # also while the correction is off (used by the display notices).
+        self._on_level = on_level
+        self._last_level: tuple[int, bool] | None = None
         self._levels = SessionLevels()
         self._enabled = threading.Event()
         self._stop = threading.Event()
@@ -144,6 +149,8 @@ class SoftwareVolume:
                     elif device is not None and now >= revalidate_at:
                         device = self._find_endpoint() or device
                         revalidate_at = now + 30.0
+                    if device is not None:
+                        self._observe_level(device)
                     if device is None:
                         self.last_gain = None
                     elif self._enabled.is_set():
@@ -165,6 +172,18 @@ class SoftwareVolume:
         finally:
             try:
                 comtypes.CoUninitialize()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _observe_level(self, device) -> None:
+        if self._on_level is None:
+            return
+        endpoint = device.EndpointVolume
+        level = (round(float(endpoint.GetMasterVolumeLevelScalar()) * 100), bool(endpoint.GetMute()))
+        previous, self._last_level = self._last_level, level
+        if previous is not None and level != previous:
+            try:
+                self._on_level(*level)
             except Exception:  # noqa: BLE001
                 pass
 
