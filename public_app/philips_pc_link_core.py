@@ -18,6 +18,13 @@ from pycaw.pycaw import AudioUtilities, ERole
 import platform
 
 from profiles import SUPPORTED_PROFILES, DeviceProfile, default_profile, find_profile_by_usb_id
+from sound_agent import (
+    SoundAgentState,
+    handle_mcm_notification,
+    initialize_mcm_sound_agent,
+    is_device_status_report,
+    is_sound_agent_notification,
+)
 
 MEDIA_KEYS = {
     0: ("Play/Pause", 0xB3),
@@ -432,8 +439,15 @@ def _find_device(ctx: usb1.USBContext, profile: DeviceProfile):
     return None
 
 
-def send_pc_link_enable(profile: DeviceProfile | None = None) -> str:
+def send_pc_link_enable(
+    profile: DeviceProfile | None = None,
+    *,
+    device_family: str = "FWM",
+) -> str:
     active_profile = profile or detect_profile() or default_profile()
+    family = str(device_family).strip().upper()
+    if family not in {"FWM", "MCM"}:
+        raise ValueError("Familia do aparelho invalida; use FWM ou MCM.")
     with USB_LOCK:
         with usb1.USBContext() as ctx:
             dev = _find_device(ctx, active_profile)
@@ -450,6 +464,12 @@ def send_pc_link_enable(profile: DeviceProfile | None = None) -> str:
                     f"{active_profile.display_name} encontrado: bus={dev.getBusNumber()} "
                     f"addr={dev.getDeviceAddress()} serial={serial!r} revisao={revision:04x}",
                 ]
+                if family == "MCM":
+                    lines.append(
+                        initialize_mcm_sound_agent(handle, revision=revision)
+                    )
+                    return "\n".join(lines)
+
                 for packet in active_profile.pc_link_packets:
                     sent = handle.controlWrite(
                         packet.request_type,
@@ -610,7 +630,13 @@ def default_log_path() -> Path:
     return desktop_dir() / f"philips-usb-pc-link-log-{timestamp}.txt"
 
 
-def export_log(profile: DeviceProfile | None = None, *, destination: Path | str | None = None) -> Path:
+def export_log(
+    profile: DeviceProfile | None = None,
+    *,
+    destination: Path | str | None = None,
+    device_family: str = "FWM",
+    app_trace: str = "",
+) -> Path:
     """Write a single support log: app/device status, Windows PnP/driver data and USB descriptors."""
     active_profile = profile or detect_profile() or default_profile()
     destination = Path(destination) if destination is not None else default_log_path()
@@ -622,6 +648,7 @@ def export_log(profile: DeviceProfile | None = None, *, destination: Path | str 
         f"Data: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"Windows: {platform.platform()}",
         f"Perfil: {active_profile.display_name} ({active_profile.vid_pid_label})",
+        f"Modo selecionado: {str(device_family).upper()}",
         f"Modelos suportados: {', '.join(active_profile.known_models)}",
         "",
         "Estado atual:",
@@ -633,6 +660,8 @@ def export_log(profile: DeviceProfile | None = None, *, destination: Path | str 
         f"  Resumo: {status.summary}",
         "",
     ]
+    if app_trace.strip():
+        header.extend(("Log da sessao:", app_trace.strip(), ""))
 
     script = rf"""
 "Dispositivos PnP:"
@@ -664,6 +693,7 @@ def capture_next_report(
     *,
     timeout_s: float = 8.0,
     stop_event: threading.Event | None = None,
+    device_family: str = "FWM",
 ) -> bytes | None:
     """Wait for the next non-empty HID report from the control interface.
 
@@ -672,6 +702,10 @@ def capture_next_report(
     timeout). Returns the raw report so different remotes/models can be mapped.
     """
     active_profile = profile or detect_profile() or default_profile()
+    family = str(device_family).strip().upper()
+    if family not in {"FWM", "MCM"}:
+        raise ValueError("Familia do aparelho invalida; use FWM ou MCM.")
+    sound_agent_state = SoundAgentState()
     end = time.monotonic() + max(1.0, float(timeout_s))
     with USB_LOCK:
         with usb1.USBContext() as ctx:
@@ -698,7 +732,10 @@ def capture_next_report(
                         )
                     except usb1.USBErrorTimeout:
                         continue
-                    if data and any(data):
+                    if family == "MCM" and is_sound_agent_notification(data):
+                        handle_mcm_notification(handle, data, state=sound_agent_state)
+                        continue
+                    if data and any(data) and not is_device_status_report(data):
                         return data
                 return None
             finally:
@@ -726,11 +763,21 @@ class RadioButtonListener:
         self._last_raw: bytes | None = None
         self._last_unknown_report: bytes | None = None
         self._last_unknown_report_time = 0.0
+        self._device_family = "FWM"
+        self._sound_agent_state = SoundAgentState()
         # Learned remote map: {raw report hex (no spaces): action_id}
         self._learned: dict[str, str] = {}
 
     def set_learned_map(self, mapping: dict[str, str] | None) -> None:
         self._learned = dict(mapping or {})
+
+    def set_device_family(self, device_family: str) -> None:
+        family = str(device_family).strip().upper()
+        if family not in {"FWM", "MCM"}:
+            raise ValueError("Familia do aparelho invalida; use FWM ou MCM.")
+        if family != self._device_family:
+            self._sound_agent_state = SoundAgentState()
+        self._device_family = family
 
     @property
     def active_profile(self) -> DeviceProfile:
@@ -762,6 +809,7 @@ class RadioButtonListener:
     def start(self) -> None:
         if self.running:
             return
+        self._sound_agent_state = SoundAgentState()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="PhilipsRadioButtons", daemon=True)
         self._thread.start()
@@ -810,6 +858,27 @@ class RadioButtonListener:
                         break
 
                     if not data:
+                        continue
+
+                    if self._device_family == "MCM":
+                        response = handle_mcm_notification(
+                            handle,
+                            data,
+                            state=self._sound_agent_state,
+                        )
+                        if response is not None:
+                            self._on_event(response, data)
+                            continue
+
+                    # The MCM emits these status reports on its own. They are
+                    # never remote-control presses, even if a stale learned map
+                    # contains the same raw bytes.
+                    if is_device_status_report(data):
+                        now = time.monotonic()
+                        if data != self._last_unknown_report or now - self._last_unknown_report_time > 15:
+                            self._last_unknown_report = data
+                            self._last_unknown_report_time = now
+                            self._on_event("Status do aparelho (nao e botao)", data)
                         continue
 
                     # 1) A remote button the user has taught (learn mode).

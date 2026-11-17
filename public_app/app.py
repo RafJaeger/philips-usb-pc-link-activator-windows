@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import json
 import sys
 import threading
@@ -9,9 +8,11 @@ from datetime import datetime
 
 from PySide6.QtCore import QTimer, Signal, QObject, QSettings, QEventLoop
 from PySide6.QtGui import QAction, QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -44,22 +45,27 @@ from philips_pc_link_core import (
     send_pc_link_enable,
 )
 
-ERROR_ALREADY_EXISTS = 183
-_SINGLE_INSTANCE_MUTEX = None
+SINGLE_INSTANCE_NAME = "PhilipsUSBPCLinkActivator"
 
 
-def acquire_single_instance() -> bool:
-    global _SINGLE_INSTANCE_MUTEX
-    if sys.platform != "win32":
+def notify_existing_instance() -> bool:
+    """If another copy is already running, ask it to show its window and return True.
+
+    Uses a local socket instead of a system mutex: a left-over lock from a crash
+    is cleared automatically (QLocalServer.removeServer), so re-opening the app
+    never requires logging out or rebooting.
+    """
+    socket = QLocalSocket()
+    socket.connectToServer(SINGLE_INSTANCE_NAME)
+    if socket.waitForConnected(300):
+        try:
+            socket.write(b"show")
+            socket.flush()
+            socket.waitForBytesWritten(300)
+        finally:
+            socket.disconnectFromServer()
         return True
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
-    kernel32.CreateMutexW.restype = ctypes.c_void_p
-    _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\PhilipsUSBPCLinkActivator")
-    if not _SINGLE_INSTANCE_MUTEX:
-        return True
-    return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+    return False
 
 
 class Bridge(QObject):
@@ -68,6 +74,7 @@ class Bridge(QObject):
     refresh = Signal()
     device_status = Signal(object)
     capture_done = Signal()
+    sound_agent_window = Signal(bool)
 
 
 class MainWindow(QMainWindow):
@@ -83,6 +90,7 @@ class MainWindow(QMainWindow):
         self.bridge.status.connect(self.set_status_text)
         self.bridge.refresh.connect(self.poll_status)
         self.bridge.device_status.connect(self.apply_status)
+        self.bridge.sound_agent_window.connect(self.set_sound_agent_window)
 
         self.title_label = QLabel("Philips USB PC Link Activator for Windows")
         self.title_label.setObjectName("titleLabel")
@@ -92,6 +100,13 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("statusLabel")
 
         self.settings = QSettings("RafJaeger", "PhilipsUSBPCLinkActivator")
+
+        self.family_combo = QComboBox()
+        self.family_combo.addItem("FWM / FWC (padrao)", "FWM")
+        self.family_combo.addItem("MCM (Sound Agent 2)", "MCM")
+        saved_family = str(self.settings.value("device_family", "FWM")).upper()
+        saved_index = self.family_combo.findData(saved_family)
+        self.family_combo.setCurrentIndex(saved_index if saved_index >= 0 else 0)
 
         self.install_button = QPushButton("Instalar Driver WinUSB")
         self.activate_button = QPushButton("Ativar PC Link Agora")
@@ -132,6 +147,10 @@ class MainWindow(QMainWindow):
         device_box.setObjectName("panel")
         device_layout = QVBoxLayout()
         device_layout.addWidget(self.profile_label)
+        family_row = QHBoxLayout()
+        family_row.addWidget(QLabel("Modelo / protocolo:"))
+        family_row.addWidget(self.family_combo, 1)
+        device_layout.addLayout(family_row)
         device_layout.addWidget(self.status_label)
         device_layout.addLayout(actions)
         device_box.setLayout(device_layout)
@@ -180,6 +199,13 @@ class MainWindow(QMainWindow):
             }
             QPushButton:disabled { background: #4b5563; color: #cbd5e1; }
             QCheckBox { color: #e5e7eb; spacing: 8px; }
+            QComboBox {
+                background: #1c212b;
+                color: #f3f4f6;
+                border: 1px solid #303847;
+                border-radius: 5px;
+                padding: 7px 9px;
+            }
             QGroupBox#panel {
                 color: #cbd5e1;
                 border: 1px solid #303847;
@@ -216,6 +242,7 @@ class MainWindow(QMainWindow):
         self.startup_checkbox.stateChanged.connect(self.sync_startup)
 
         self.radio_listener = RadioButtonListener(self.on_radio_button, self.on_button_error, detect_profile())
+        self.radio_listener.set_device_family(self.selected_device_family())
         self._learned_map = self._load_learned_map()
         self.radio_listener.set_learned_map(self._learned_map)
         self.last_activation = 0.0
@@ -231,6 +258,7 @@ class MainWindow(QMainWindow):
         self._force_quit = False
         self._tray_notice_shown = False
         self._last_usb_connection_key = None
+        self.family_combo.currentIndexChanged.connect(self.on_device_family_changed)
         self.setup_tray()
 
         self.timer = QTimer(self)
@@ -267,17 +295,30 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._force_quit:
-            self.radio_listener.stop()
-            self.tray_icon.hide()
+            # Real quit (tray "Sair"): stop everything AND end the process.
+            try:
+                self.radio_listener.stop()
+            except Exception:
+                pass
+            try:
+                self.tray_icon.hide()
+            except Exception:
+                pass
             super().closeEvent(event)
+            # quitOnLastWindowClosed is False, so without this the event loop
+            # would keep running and the process would linger in Task Manager,
+            # holding the single-instance lock and blocking re-opening.
+            QApplication.quit()
             return
 
+        # Clicking the window's X only hides to the tray; the app keeps
+        # reactivating PC Link. Use the tray "Sair" to close it for real.
         event.ignore()
         self.hide()
         if not self._tray_notice_shown and self.tray_icon.isVisible():
             self.tray_icon.showMessage(
                 "Philips USB PC Link Activator for Windows",
-                "O app continua ativo na bandeja para reativar o PC Link.",
+                "O app continua na bandeja. Clique com o botao direito no icone e 'Sair' para fechar.",
                 QSystemTrayIcon.Information,
                 3000,
             )
@@ -303,6 +344,30 @@ class MainWindow(QMainWindow):
 
     def set_status_text(self, message: str) -> None:
         self.status_label.setText(message)
+
+    def set_sound_agent_window(self, visible: bool) -> None:
+        if visible:
+            self.restore_from_tray()
+        else:
+            self.hide()
+
+    def selected_device_family(self) -> str:
+        return str(self.family_combo.currentData() or "FWM").upper()
+
+    def on_device_family_changed(self, _index: int | None = None) -> None:
+        family = self.selected_device_family()
+        self.settings.setValue("device_family", family)
+        self.radio_listener.set_device_family(family)
+        self._pc_link_active = False
+        self.last_activation = 0.0
+        if family == "MCM":
+            self.log("Modo MCM selecionado: sera usada a negociacao do Sound Agent 2.")
+        else:
+            self.log("Modo FWM/FWC selecionado: sera usada a ativacao PC Link padrao.")
+        if self._control_ready and self.auto_checkbox.isChecked() and not self._operation_running:
+            self.activate_now(auto=True)
+        else:
+            self.poll_status()
 
     def run_bg(self, label: str, fn, log_result: bool = True, exclusive: bool = False) -> None:
         def worker() -> None:
@@ -372,8 +437,10 @@ class MainWindow(QMainWindow):
         else:
             self.install_button.setText("Instalar Driver WinUSB")
 
+        self.family_combo.setEnabled(not operation_running)
         self.activate_button.setEnabled(status.interface3_ok and not operation_running and not self._pc_link_active)
-        self.activate_button.setText("PC Link Ativo" if status.interface3_ok and self._pc_link_active else "Ativar PC Link Agora")
+        active_text = "Sound Agent Ativo" if self.selected_device_family() == "MCM" else "PC Link Ativo"
+        self.activate_button.setText(active_text if status.interface3_ok and self._pc_link_active else "Ativar PC Link Agora")
         self.default_button.setEnabled(status.audio_present and not operation_running)
         self.learn_button.setEnabled(status.interface3_ok and not operation_running)
         self.log_button.setEnabled(not operation_running)
@@ -405,7 +472,11 @@ class MainWindow(QMainWindow):
 
         if self.auto_checkbox.isChecked() and ready and not operation_running:
             now = time.time()
-            if not was_ready or connection_changed or now - self.last_activation > 25:
+            if self.selected_device_family() == "MCM":
+                should_activate = not self._pc_link_active and (not was_ready or connection_changed)
+            else:
+                should_activate = not was_ready or connection_changed or now - self.last_activation > 25
+            if should_activate:
                 self.last_activation = now
                 self.activate_now(auto=True)
 
@@ -438,6 +509,7 @@ class MainWindow(QMainWindow):
 
     def activate_now(self, auto: bool = False) -> None:
         label = "Auto-reativando PC Link..." if auto else "Ativando PC Link..."
+        family = self.selected_device_family()
         self.last_activation = time.time()
         log_result = True
         if auto and time.time() - self._last_auto_log < 120:
@@ -445,17 +517,18 @@ class MainWindow(QMainWindow):
         if auto and log_result:
             self._last_auto_log = time.time()
 
-        restart_buttons = self.buttons_checkbox.isChecked() and self.radio_listener.running
+        restart_listener = self.radio_listener.running
+        resume_listener = self.buttons_checkbox.isChecked() or family == "MCM"
 
         def activate_safely() -> str:
-            if restart_buttons:
+            if restart_listener:
                 self.radio_listener.stop()
             try:
-                result = send_pc_link_enable()
+                result = send_pc_link_enable(device_family=family)
                 self._pc_link_active = True
                 return result
             finally:
-                if restart_buttons:
+                if resume_listener and self._control_ready:
                     self.radio_listener.start()
 
         self.run_bg(label, activate_safely, log_result=log_result, exclusive=True)
@@ -474,8 +547,15 @@ class MainWindow(QMainWindow):
             self.log("Log cancelado.")
             return
 
+        family = self.selected_device_family()
+        session_trace = self.log_box.toPlainText()
+
         def export_safely() -> str:
-            saved = export_log(destination=chosen)
+            saved = export_log(
+                destination=chosen,
+                device_family=family,
+                app_trace=session_trace,
+            )
             return f"Log salvo: {saved}"
 
         self.run_bg("Gerando log...", export_safely)
@@ -498,10 +578,14 @@ class MainWindow(QMainWindow):
     def _capture_one(self, timeout_s: float) -> bytes | None:
         """Capture one report from the GUI thread without freezing the UI."""
         result: dict[str, object] = {}
+        family = self.selected_device_family()
 
         def worker() -> None:
             try:
-                result["data"] = capture_next_report(timeout_s=timeout_s)
+                result["data"] = capture_next_report(
+                    timeout_s=timeout_s,
+                    device_family=family,
+                )
             except Exception as exc:  # noqa: BLE001
                 result["error"] = str(exc)
             self.bridge.capture_done.emit()
@@ -589,7 +673,9 @@ class MainWindow(QMainWindow):
                 "Idealizado e testado originalmente por Rafael Jaeger.\n"
                 "Criado para recuperar o USB PC Link de aparelhos Philips antigos "
                 "em Windows modernos.\n\n"
-                "Primeiro perfil validado: Philips Audio Set 0471:0111."
+                "FWM/FWC: ativacao PC Link padrao.\n"
+                "MCM: implementacao da inicializacao do Sound Agent 2.\n\n"
+                "Perfil USB: Philips Audio Set 0471:0111."
             ),
         )
 
@@ -602,19 +688,33 @@ class MainWindow(QMainWindow):
             self.log(f"Erro ao alterar inicializacao: {exc}")
 
     def sync_button_listener(self) -> None:
-        if self.buttons_checkbox.isChecked():
+        sound_agent_required = self.selected_device_family() == "MCM"
+        if self.buttons_checkbox.isChecked() or sound_agent_required:
             if not self._control_ready:
                 return
             if time.time() < self._buttons_backoff_until:
                 return
             if not self.radio_listener.running:
                 self.radio_listener.start()
-                self.log("Leitor de botoes do radio ligado.")
+                if sound_agent_required:
+                    self.log("Canal continuo do Sound Agent ligado.")
+                else:
+                    self.log("Leitor de botoes do radio ligado.")
         else:
             self.radio_listener.stop()
             self.log("Leitor de botoes do radio desligado.")
 
     def on_radio_button(self, name: str, raw: bytes) -> None:
+        if name.startswith("Sound Agent:"):
+            self.bridge.log.emit(f"{name} raw={raw.hex(' ')}")
+            if "pedido para abrir a interface" in name:
+                self.bridge.sound_agent_window.emit(True)
+            elif "pedido para fechar a interface" in name:
+                self.bridge.sound_agent_window.emit(False)
+            return
+        if name.startswith("Status do aparelho"):
+            self.bridge.log.emit(f"{name} raw={raw.hex(' ')}")
+            return
         self.bridge.log.emit(f"Botao: {name} raw={raw.hex(' ')}")
 
     def on_button_error(self, message: str) -> None:
@@ -623,29 +723,41 @@ class MainWindow(QMainWindow):
         if message == self._last_button_error and time.time() < self._buttons_backoff_until:
             return
         self._last_button_error = message
-        self.bridge.log.emit(f"Botoes: {message}")
+        channel = "Sound Agent/controle" if self.selected_device_family() == "MCM" else "Botoes"
+        self.bridge.log.emit(f"{channel}: {message}")
 
 
 def main() -> int:
-    is_first_instance = acquire_single_instance()
     app = QApplication(sys.argv)
     QApplication.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(str(app_root() / "assets" / "app.ico")))
-    if not is_first_instance:
-        if "--minimized" not in sys.argv:
-            QMessageBox.information(
-                None,
-                "Philips USB PC Link Activator for Windows",
-                "O app ja esta aberto. Procure o icone de caixinha na bandeja do Windows.",
-            )
+
+    # Already running? Bring the existing window back instead of refusing.
+    if notify_existing_instance():
         return 0
 
+    server = QLocalServer()
+    QLocalServer.removeServer(SINGLE_INSTANCE_NAME)  # clear any stale lock from a crash
+    server.listen(SINGLE_INSTANCE_NAME)
+
     window = MainWindow()
+
+    def on_second_instance() -> None:
+        conn = server.nextPendingConnection()
+        if conn is not None:
+            conn.disconnected.connect(conn.deleteLater)
+        window.restore_from_tray()
+
+    server.newConnection.connect(on_second_instance)
+
     if "--minimized" in sys.argv:
         window.hide()
     else:
         window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":
