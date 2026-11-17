@@ -9,11 +9,17 @@ class SoundAgentError(RuntimeError):
     """Raised when the MCM does not complete the Sound Agent handshake."""
 
 
-KNOWN_DEVICE_STATUS_REPORTS = frozenset((b"\x80\x4a", b"\x80\x80"))
+# "80 80" is an autonomous report that no Philips PC program answers. It is
+# never a button press. ("80 4a" used to be listed here, but PhilipsRemote.exe
+# shows it is GET_PC_PLAYER1_STATUS: a request that must be answered.)
+KNOWN_DEVICE_STATUS_REPORTS = frozenset((b"\x80\x80",))
+
+# Largest frame uacb.dll accepts in UacbSendData (0x28 bytes on the wire).
+MAX_FRAME_BYTES = 0x28
 
 
 def is_device_status_report(data: bytes) -> bool:
-    """Return True for autonomous MCM status reports, never button presses."""
+    """Return True for autonomous status reports, never button presses."""
     return bytes(data) in KNOWN_DEVICE_STATUS_REPORTS
 
 
@@ -108,11 +114,18 @@ def _send_framed_packet(
     ready_timeout_s: float,
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
+    strict_length: bool = True,
 ) -> int:
-    if not packet or packet[0] + 1 != len(packet):
+    if not packet or len(packet) > MAX_FRAME_BYTES:
+        raise SoundAgentError("Pacote Sound Agent com tamanho invalido.")
+    # PhilipsRemote's GET_DATA reply is the one original frame whose first
+    # byte does not match its length; strict_length=False reproduces it.
+    if strict_length and packet[0] + 1 != len(packet):
         raise SoundAgentError("Pacote Sound Agent com tamanho invalido.")
     _write_memory(handle, 0xA4F4, packet, timeout_ms=timeout_ms)
-    _write_memory(handle, 0xA544, bytes((len(packet),)), timeout_ms=timeout_ms)
+    # uacb.dll writes one byte from the same packet pointer: the frame's
+    # first byte (number of remaining bytes), not the total USB byte count.
+    _write_memory(handle, 0xA544, packet[0:1], timeout_ms=timeout_ms)
 
     deadline = monotonic() + max(0.05, float(ready_timeout_s))
     polls = 0
@@ -128,6 +141,75 @@ def _send_framed_packet(
                 f"A544 permaneceu em 0x{last_state:02X}."
             )
         sleep(0.01)
+
+
+def send_frame(
+    handle,
+    packet: bytes,
+    *,
+    timeout_ms: int = 1000,
+    ready_timeout_s: float = 1.25,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    strict_length: bool = True,
+) -> int:
+    """Send one frame through the A4F4/A544 mailbox used by uacb.dll.
+
+    For 0471:0111, uacb.dll routes both Sound Agent packets and the
+    PhilipsRemote (MusicMatch) PC Link replies through this mailbox.
+    Returns how many A544 reads were needed before the unit cleared it.
+    """
+    return _send_framed_packet(
+        handle,
+        bytes(packet),
+        timeout_ms=timeout_ms,
+        ready_timeout_s=ready_timeout_s,
+        sleep=sleep,
+        monotonic=monotonic,
+        strict_length=strict_length,
+    )
+
+
+def read_memory(handle, address: int, length: int, *, timeout_ms: int = 1000) -> bytes:
+    return _read_memory(handle, address, length, timeout_ms=timeout_ms)
+
+
+def write_memory(handle, address: int, payload: bytes, *, timeout_ms: int = 1000) -> int:
+    return _write_memory(handle, address, bytes(payload), timeout_ms=timeout_ms)
+
+
+def mailbox_handler_installed(handle, *, timeout_ms: int = 1000) -> bool:
+    """Return True when the filter-driver setup block is already in the chip.
+
+    The original uacbflt.sys installed it at every device start on all
+    0471:0111 Rev_0402 units (FWM and MCM alike). It provides the A544
+    mailbox that answers PC Link and Sound Agent frames.
+    """
+    try:
+        hook = _read_memory(handle, 0xA0DE, 2, timeout_ms=timeout_ms)
+        code = _read_memory(handle, 0xA556, 4, timeout_ms=timeout_ms)
+    except Exception:
+        return False
+    return hook == bytes.fromhex("56 A5") and code == LEGACY_MCM_SETUP[2][1][:4]
+
+
+def install_mailbox_handler(
+    handle,
+    *,
+    timeout_ms: int = 1000,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[str]:
+    """Write the original filter-driver setup block (same as uacbflt.sys)."""
+    trace: list[str] = []
+    for address, payload in LEGACY_MCM_SETUP:
+        sent = _write_memory(handle, address, payload, timeout_ms=timeout_ms)
+        trace.append(f"Setup Philips: wIndex=0x{address:04X} sent={sent}/{len(payload)}")
+        sleep(0.02)
+    return trace
+
+
+def read_hid_mailbox(handle, length: int, *, timeout_ms: int = 1000) -> bytes:
+    return _read_hid_mailbox(handle, length, timeout_ms=timeout_ms)
 
 
 def _read_hid_mailbox(handle, length: int, *, timeout_ms: int) -> bytes:
@@ -263,12 +345,8 @@ def initialize_mcm_sound_agent(
         + (f" (revisao USB {revision:04X})" if revision is not None else "")
     ]
 
-    for address, payload in LEGACY_MCM_SETUP:
-        sent = _write_memory(handle, address, payload, timeout_ms=timeout_ms)
-        trace.append(
-            f"MCM setup: wIndex=0x{address:04X} sent={sent}/{len(payload)}"
-        )
-        sleep(0.02)
+    for line in install_mailbox_handler(handle, timeout_ms=timeout_ms, sleep=sleep):
+        trace.append(line.replace("Setup Philips:", "MCM setup:"))
 
     states: list[int] = []
     for attempt in range(1, 3):

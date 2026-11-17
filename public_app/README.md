@@ -22,12 +22,16 @@ FWM589 generation.
 USB\VID_0471&PID_0111&MI_03
 ```
 
-- Sends the PC Link wake-up sequence used by the original Philips stack:
+- Sends the standard FWM/FWC PC Link wake-up sequence used by the original
+  Philips stack:
 
 ```text
 40 04 00 00 a4 ef 01 00 01
 40 04 00 00 a4 f0 01 00 ff
 ```
+
+- In MCM mode, reproduces the Philips Sound Agent 2 startup negotiation and
+  keeps its runtime request/response channel active.
 
 - Re-activates PC Link after USB reconnects or after the stereo is switched
   away from PC Link and back.
@@ -38,6 +42,16 @@ USB\VID_0471&PID_0111&MI_03
 - Captures raw control reports so new front-panel or remote-control formats can
   be mapped safely for additional models.
 - Provides startup and auto-reactivation options for daily use.
+- Saves the selected device family (`FWM/FWC` or `MCM`) between app launches.
+- Shows the current song on the stereo display: it answers the stereo's
+  title/artist/album requests with the track playing in Windows (the same data
+  as the Windows media flyout: Spotify, browsers, Media Player, VLC...) and
+  tells the stereo when the song or play state changes. This reproduces
+  PhilipsRemote.exe, the Philips component the original CD installed with
+  MusicMatch Jukebox. See `docs/PC_LINK_REMOTE_PROTOCOL.md`.
+- Executes the stereo's PC commands (play, pause, stop, next, previous, search,
+  shuffle, repeat) on the current Windows player, and its PC volume commands on
+  the Windows volume.
 
 ## Supported Hardware
 
@@ -60,8 +74,8 @@ be added once users export diagnostics from the app.
 ## User Flow
 
 1. Connect the Philips stereo by USB.
-2. Select `PC Link` on the stereo.
-3. Open the app.
+2. Open the app and select the correct family: `FWM/FWC` or `MCM`.
+3. Select `PC Link` on the stereo.
 4. If prompted, install the WinUSB control driver. This requires administrator
    approval and must apply only to `MI_03`.
 5. Click `Activate PC Link`.
@@ -69,10 +83,26 @@ be added once users export diagnostics from the app.
 7. Enable `Auto-reactivate` and `Start with Windows` for normal day-to-day use.
 
 Activation is not permanent. If the USB cable is unplugged, Windows restarts, or
-the stereo leaves PC Link mode, the app should send the wake-up sequence again.
-If Windows no longer lists the stereo as a present USB device, the app waits for
-the stereo to enumerate again instead of repeatedly asking to reinstall a driver
-that is already installed.
+the stereo leaves PC Link mode, the app should activate it again. If Windows no
+longer lists the stereo as a present USB device, the app waits for the stereo to
+enumerate again instead of repeatedly asking to reinstall a driver that is
+already installed.
+
+## Device Family Selection and MCM Behavior
+
+FWM/FWC and MCM models can expose the same USB ID and revision, so the app cannot
+distinguish them reliably from descriptors alone. The selected family is saved.
+It matters: MCM mode intentionally runs the Sound Agent negotiation instead of
+the two-write FWM/FWC sequence, while FWM/FWC mode does not run the MCM
+negotiation.
+
+If MCM activation fails, the manual activation button remains available and
+auto-reactivation schedules another attempt after 10 seconds without requiring
+a USB reconnect. A failure while responding to one runtime request is logged,
+but the listener stays active for subsequent requests.
+
+An MCM can send the original Sound Agent command `0x61` to show or hide the app
+window. This is expected protocol behavior, not a random window action.
 
 ## Radio Buttons
 
@@ -92,27 +122,64 @@ The UI should show whether button capture is active and display the last
 received command for diagnostics.
 
 Some stereos may forward remote-control IR buttons differently from the
-front-panel buttons, or may not forward them over USB at all. Use `Capturar
-Controle`, press the remote buttons for 15 seconds, and attach the generated
-Desktop capture file when requesting support for a new mapping. Unknown reports
+front-panel buttons, or may not forward them over USB at all. Use `Aprender
+Controle`, follow the prompts and press each requested button to save a mapping.
+Unknown reports
 should be mapped only after a real capture; the app intentionally avoids turning
 random bytes into media keys.
 
-Known status packets such as `80 4a` are logged as unknown diagnostics and must
-not be treated as media buttons.
+Reports `80 xx` are not buttons: they are requests from the stereo's PC Link
+protocol. `80 4a` (`GET_PC_PLAYER1_STATUS`, repeated while the stereo looks
+for PC software) is answered, never ignored or learned as a button. Only
+`80 80` remains an autonomous status report.
+
+## Song Title on the Display
+
+Enable `Mostrar musica no visor do radio` (on by default). The control channel
+stays open even when the radio buttons are disabled, because the stereo asks
+the PC for the title. Text is sent as plain ASCII (accents are removed and
+quotes dropped). The FWM589 display shows 8 characters and does not scroll by
+itself, so the app scrolls `Title - Artist` through it (set `Visor` to the
+number of characters your model shows; longer text scrolls). The current song
+is also shown in the app window.
+
+On FWM/FWC units the reply mailbox is created on first use by writing the same
+setup block that the original Philips filter driver wrote on every
+`0471:0111 Rev_0402` unit. MCM mode writes it during activation.
 
 ## Volume Behavior
 
+The UAC3553B tells Windows it has a hardware volume control (USB Audio feature
+unit, -41..0 dB), so Windows sends the volume to the chip instead of
+attenuating the audio. The chip ignores that value; only mute works. Result
+without a fix: with `Philips Audio Set` as output, the Windows slider and
+volume keys only produce 100% or 0% (verified on a FWM589; a player's own
+volume, such as YouTube's, still works).
+
+`Corrigir volume do Windows na saida Philips` (on by default) applies the
+Windows volume in software: the app follows the Philips endpoint level and
+scales every audio session playing on it, like a player's own volume does.
+Levels changed in the Windows volume mixer are kept as relative levels, and
+all sessions return to their own level when the option is turned off or the
+app quits.
+
 There are two volume layers:
 
-- Windows endpoint/software volume for `Philips Audio Set`.
+- Windows volume (default output, or only the `Philips Audio Set` output).
 - The stereo amplifier volume controlled by the physical radio knob.
 
-The app maps the radio's volume buttons to Windows media volume behavior when
-button capture is active. The main UI intentionally does not expose a software
-volume slider until endpoint/hardware synchronization is reliable per model.
-True hardware volume synchronization should be treated as experimental until
-verified per model.
+`Botoes de volume` selects what the radio's volume buttons and PC volume
+commands control:
+
+- `Volume do Windows (padrao)`: the Windows volume keys are pressed, so the
+  default output changes and the Windows volume indicator appears, exactly as
+  with a keyboard volume key.
+- `Somente a saida Philips`: only the `Philips Audio Set` endpoint volume.
+
+The stereo can also ask for the PC volume (`GET_PC_VOLUME_STATUS`) and set an
+absolute value (`SET_PC_VOLUME`); both use the selected target. If a model
+keeps its volume buttons for its own amplifier and never reports them over
+USB, Windows cannot see those presses.
 
 The app does not re-encode, resample or route audio through its own mixer. Audio
 playback stays on the Philips USB Audio interface exposed to Windows, so quality
@@ -123,7 +190,8 @@ volume and use the Philips endpoint directly.
 ## Development
 
 ```powershell
-python -m pip install PySide6 libusb1 libusb-package pycaw comtypes
+python -m pip install -r .\requirements.txt
+python -m unittest discover -s tests
 python .\app.py
 ```
 

@@ -17,14 +17,38 @@ from pycaw.pycaw import AudioUtilities, ERole
 
 import platform
 
+from pc_link_protocol import MediaInfo, PcLinkSession, is_pc_link_request
 from profiles import SUPPORTED_PROFILES, DeviceProfile, default_profile, find_profile_by_usb_id
 from sound_agent import (
     SoundAgentState,
     handle_mcm_notification,
     initialize_mcm_sound_agent,
+    install_mailbox_handler,
     is_device_status_report,
     is_sound_agent_notification,
+    mailbox_handler_installed,
 )
+
+VK_VOLUME_MUTE = 0xAD
+VK_VOLUME_DOWN = 0xAE
+VK_VOLUME_UP = 0xAF
+
+# How the radio's volume buttons act on the PC:
+#   "windows": the Windows volume of the default output, with the on-screen
+#              volume indicator (same as a keyboard volume key).
+#   "philips": only the Philips Audio Set output volume.
+VOLUME_MODES = ("windows", "philips")
+_volume_mode = "windows"
+
+
+def set_volume_mode(mode: str) -> None:
+    global _volume_mode
+    value = str(mode).strip().lower()
+    _volume_mode = value if value in VOLUME_MODES else "windows"
+
+
+def get_volume_mode() -> str:
+    return _volume_mode
 
 MEDIA_KEYS = {
     0: ("Play/Pause", 0xB3),
@@ -443,11 +467,19 @@ def send_pc_link_enable(
     profile: DeviceProfile | None = None,
     *,
     device_family: str = "FWM",
+    pc_link: PcLinkSession | None = None,
 ) -> str:
     active_profile = profile or detect_profile() or default_profile()
     family = str(device_family).strip().upper()
     if family not in {"FWM", "MCM"}:
         raise ValueError("Familia do aparelho invalida; use FWM ou MCM.")
+    result = _send_pc_link_enable(active_profile, family)
+    if pc_link is not None:
+        pc_link.on_activation(mailbox_installed=family == "MCM")
+    return result
+
+
+def _send_pc_link_enable(active_profile: DeviceProfile, family: str) -> str:
     with USB_LOCK:
         with usb1.USBContext() as ctx:
             dev = _find_device(ctx, active_profile)
@@ -547,6 +579,100 @@ def toggle_windows_mute(profile: DeviceProfile | None = None) -> None:
     set_windows_volume(scalar, not muted, profile)
 
 
+def _default_endpoint_volume():
+    comtypes.CoInitialize()
+    device = AudioUtilities.GetSpeakers()
+    if device is None:
+        raise RuntimeError("Nenhuma saida de audio padrao no Windows.")
+    return device.EndpointVolume
+
+
+def get_default_volume() -> tuple[int, bool]:
+    """Volume (0-100) and mute of the Windows default output."""
+    endpoint = _default_endpoint_volume()
+    return round(float(endpoint.GetMasterVolumeLevelScalar()) * 100), bool(endpoint.GetMute())
+
+
+def set_default_volume(percent: int) -> None:
+    endpoint = _default_endpoint_volume()
+    endpoint.SetMasterVolumeLevelScalar(max(0.0, min(1.0, float(percent) / 100.0)), None)
+    if percent > 0 and endpoint.GetMute():
+        endpoint.SetMute(False, None)
+
+
+def volume_key(direction: int) -> None:
+    """Press the Windows volume key: changes the default output and shows the OSD."""
+    if direction > 0:
+        send_media_key(VK_VOLUME_UP)
+    elif direction < 0:
+        send_media_key(VK_VOLUME_DOWN)
+    else:
+        send_media_key(VK_VOLUME_MUTE)
+
+
+class WindowsPcLinkHost:
+    """Connect the unit's PC Link requests to Windows media and volume."""
+
+    def __init__(self, media_monitor=None, profile: DeviceProfile | None = None) -> None:
+        self.media_monitor = media_monitor
+        self.profile = profile
+
+    def media(self) -> MediaInfo | None:
+        if self.media_monitor is None:
+            return None
+        return self.media_monitor.snapshot()
+
+    def media_command(self, name: str) -> None:
+        if self.media_monitor is not None:
+            self.media_monitor.command(name)
+            return
+        fallback = {"play": 0xB3, "pause": 0xB3, "stop": 0xB2, "next": 0xB0, "previous": 0xB1}
+        if name in fallback:
+            send_media_key(fallback[name])
+
+    def volume_step(self, direction: int) -> None:
+        if get_volume_mode() == "philips":
+            try:
+                adjust_windows_volume(0.04 if direction > 0 else -0.04, self.profile)
+                return
+            except Exception:
+                pass
+        volume_key(direction)
+
+    def toggle_mute(self) -> None:
+        if get_volume_mode() == "philips":
+            try:
+                toggle_windows_mute(self.profile)
+                return
+            except Exception:
+                pass
+        volume_key(0)
+
+    def set_volume(self, percent: int) -> None:
+        if get_volume_mode() == "philips":
+            try:
+                set_windows_volume(percent / 100.0, False if percent > 0 else None, self.profile)
+                return
+            except Exception:
+                pass
+        set_default_volume(percent)
+
+    def volume_state(self) -> tuple[int, bool] | None:
+        if get_volume_mode() == "philips":
+            state = get_windows_volume(self.profile)
+            if state is None:
+                return None
+            return round(state[0] * 100), state[1]
+        return get_default_volume()
+
+
+def ensure_pc_link_mailbox(handle) -> list[str]:
+    """Install the original setup block once, if the unit does not have it."""
+    if mailbox_handler_installed(handle):
+        return []
+    return install_mailbox_handler(handle)
+
+
 def set_default_output(profile: DeviceProfile | None = None) -> None:
     device = find_philips_render_endpoint(profile)
     if device is None:
@@ -636,12 +762,28 @@ def export_log(
     destination: Path | str | None = None,
     device_family: str = "FWM",
     app_trace: str = "",
+    pc_link: PcLinkSession | None = None,
 ) -> Path:
     """Write a single support log: app/device status, Windows PnP/driver data and USB descriptors."""
     active_profile = profile or detect_profile() or default_profile()
     destination = Path(destination) if destination is not None else default_log_path()
 
     status = get_status()
+    pc_link_lines: list[str] = []
+    if pc_link is not None:
+        state = pc_link.state
+        seen = ", ".join(
+            f"0x{command:02X}x{count}" for command, count in sorted(state.requests_seen.items())
+        )
+        pc_link_lines = [
+            "",
+            "PC Link (protocolo PhilipsRemote):",
+            f"  Aparelho fez pedidos PC Link: {'sim' if state.unit_active else 'nao'}",
+            f"  Pedidos recebidos: {seen or 'nenhum'}",
+            f"  Canal A544 pronto: {'sim' if state.mailbox_ready else 'nao'}",
+            f"  Eventos do PC ligados: {'sim' if state.events_enabled else 'nao'}",
+            f"  Controle de volume UAC (0x22): {'sim' if state.uac_volume_control else 'nao'}",
+        ]
     header = [
         "Philips USB PC Link - log",
         f"App: {app_version()}",
@@ -649,6 +791,7 @@ def export_log(
         f"Windows: {platform.platform()}",
         f"Perfil: {active_profile.display_name} ({active_profile.vid_pid_label})",
         f"Modo selecionado: {str(device_family).upper()}",
+        f"Botoes de volume: {get_volume_mode()}",
         f"Modelos suportados: {', '.join(active_profile.known_models)}",
         "",
         "Estado atual:",
@@ -658,6 +801,7 @@ def export_log(
         f"  Audio presente no Windows: {'sim' if status.audio_present else 'nao'}",
         f"  Saida padrao do Windows: {'sim' if status.default_output else 'nao'}",
         f"  Resumo: {status.summary}",
+        *pc_link_lines,
         "",
     ]
     if app_trace.strip():
@@ -694,6 +838,7 @@ def capture_next_report(
     timeout_s: float = 8.0,
     stop_event: threading.Event | None = None,
     device_family: str = "FWM",
+    pc_link: PcLinkSession | None = None,
 ) -> bytes | None:
     """Wait for the next non-empty HID report from the control interface.
 
@@ -733,7 +878,16 @@ def capture_next_report(
                     except usb1.USBErrorTimeout:
                         continue
                     if family == "MCM" and is_sound_agent_notification(data):
-                        handle_mcm_notification(handle, data, state=sound_agent_state)
+                        try:
+                            handle_mcm_notification(handle, data, state=sound_agent_state)
+                        except Exception:
+                            pass
+                        continue
+                    # Requests from the unit (status polls, title queries)
+                    # are answered, never learned as buttons.
+                    if is_pc_link_request(data):
+                        if pc_link is not None:
+                            pc_link.handle_request(handle, data)
                         continue
                     if data and any(data) and not is_device_status_report(data):
                         return data
@@ -752,10 +906,15 @@ class RadioButtonListener:
         on_event: Callable[[str, bytes], None],
         on_error: Callable[[str], None],
         profile: DeviceProfile | None = None,
+        pc_link: PcLinkSession | None = None,
     ) -> None:
         self._on_event = on_event
         self._on_error = on_error
         self._profile = profile or default_profile()
+        self.pc_link = pc_link
+        self._pc_link_log_times: dict[str, float] = {}
+        self._next_event_poll = 0.0
+        self._buttons_enabled = True
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_bits = 0
@@ -770,6 +929,10 @@ class RadioButtonListener:
 
     def set_learned_map(self, mapping: dict[str, str] | None) -> None:
         self._learned = dict(mapping or {})
+
+    def set_buttons_enabled(self, enabled: bool) -> None:
+        """Buttons off: still answer the unit's PC Link requests, ignore presses."""
+        self._buttons_enabled = bool(enabled)
 
     def set_device_family(self, device_family: str) -> None:
         family = str(device_family).strip().upper()
@@ -825,6 +988,73 @@ class RadioButtonListener:
         self._last_unknown_report = None
         self._last_unknown_report_time = 0.0
 
+    def _dispatch_mcm_notification(self, handle, data: bytes) -> bool:
+        """Handle one MCM request without letting a response error stop the reader."""
+        try:
+            response = handle_mcm_notification(
+                handle,
+                data,
+                state=self._sound_agent_state,
+            )
+        except Exception as exc:
+            self._on_error(
+                "Sound Agent: falha ao responder ao pedido "
+                f"{data.hex(' ')}: {exc}. Leitura mantida ativa."
+            )
+            return True
+
+        if response is None:
+            return False
+        self._on_event(response, data)
+        return True
+
+    # Polls the unit repeats constantly; log them once in a while only.
+    # 0x40/0x52 are fetched again at every marquee step of the display.
+    _QUIET_PC_LINK_COMMANDS = ("(0x4A)", "(0x4B)", "(0x4C)", "(0x47)", "(0x49)", "(0x40)", "(0x52)")
+
+    def _report_pc_link(self, message: str | None, data: bytes) -> None:
+        if not message:
+            return
+        quiet = any(tag in message for tag in self._QUIET_PC_LINK_COMMANDS)
+        if quiet and "falha" not in message and "pausadas" not in message:
+            key = message.split(" respondido")[0]
+            now = time.monotonic()
+            if now - self._pc_link_log_times.get(key, -1e9) < 120:
+                return
+            self._pc_link_log_times[key] = now
+        self._on_event(message, data)
+
+    def _dispatch_pc_link(self, handle, data: bytes) -> bool:
+        if self.pc_link is None or not is_pc_link_request(data):
+            return False
+        # Transport/volume commands are radio buttons: obey the buttons option.
+        if not self._buttons_enabled and data[1] < 0x40 and data[1] not in (0x22, 0x23):
+            return True
+        try:
+            message = self.pc_link.handle_request(handle, data)
+        except Exception as exc:  # noqa: BLE001
+            message = f"PC Link: falha inesperada em {data.hex(' ')}: {exc}"
+        self._report_pc_link(message, data)
+        for note in self.pc_link.take_notes():
+            self._on_event(note, data)
+        return True
+
+    def _poll_pc_link_events(self, handle) -> None:
+        if self.pc_link is None:
+            return
+        now = time.monotonic()
+        if now < self._next_event_poll:
+            return
+        self._next_event_poll = now + 0.2
+        try:
+            messages = self.pc_link.poll_events(handle)
+        except Exception as exc:  # noqa: BLE001
+            messages = [f"PC Link: falha ao avisar o aparelho: {exc}"]
+        for message in messages:
+            self._on_event(message, b"")
+        for note in self.pc_link.take_notes():
+            self._on_event(note, b"")
+
     def _run(self) -> None:
         try:
             with USB_LOCK:
@@ -852,23 +1082,23 @@ class RadioButtonListener:
                         self._last_bits = 0
                         self._last_alt_bits = 0
                         self._last_raw = None
+                        self._poll_pc_link_events(handle)
                         continue
                     except usb1.USBError as exc:
                         self._on_error(f"Leitura dos botoes falhou: {exc}")
                         break
 
+                    self._poll_pc_link_events(handle)
                     if not data:
                         continue
 
-                    if self._device_family == "MCM":
-                        response = handle_mcm_notification(
-                            handle,
-                            data,
-                            state=self._sound_agent_state,
-                        )
-                        if response is not None:
-                            self._on_event(response, data)
-                            continue
+                    if self._device_family == "MCM" and self._dispatch_mcm_notification(handle, data):
+                        continue
+
+                    # PhilipsRemote protocol: title/status requests and the
+                    # unit's PC transport/volume commands (FWM and MCM).
+                    if self._dispatch_pc_link(handle, data):
+                        continue
 
                     # The MCM emits these status reports on its own. They are
                     # never remote-control presses, even if a stale learned map
@@ -879,6 +1109,9 @@ class RadioButtonListener:
                             self._last_unknown_report = data
                             self._last_unknown_report_time = now
                             self._on_event("Status do aparelho (nao e botao)", data)
+                        continue
+
+                    if not self._buttons_enabled:
                         continue
 
                     # 1) A remote button the user has taught (learn mode).
@@ -926,18 +1159,19 @@ def send_media_key(vk_code: int) -> None:
 
 
 def handle_media_button(bit: int, vk_code: int, profile: DeviceProfile) -> None:
-    try:
-        if bit == 4:
-            toggle_windows_mute(profile)
+    # Volume/mute: in "windows" mode press the real Windows volume key, so the
+    # default output changes and the Windows volume indicator appears.
+    if bit in (4, 5, 6) and get_volume_mode() == "philips":
+        try:
+            if bit == 4:
+                toggle_windows_mute(profile)
+            elif bit == 5:
+                adjust_windows_volume(0.04, profile)
+            else:
+                adjust_windows_volume(-0.04, profile)
             return
-        if bit == 5:
-            adjust_windows_volume(0.04, profile)
-            return
-        if bit == 6:
-            adjust_windows_volume(-0.04, profile)
-            return
-    except Exception:
-        pass
+        except Exception:
+            pass
     send_media_key(vk_code)
 
 

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QStyle,
     QSystemTrayIcon,
     QTextEdit,
@@ -28,13 +29,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from media_session import MediaMonitor
+from software_volume import SoftwareVolume
+from pc_link_protocol import DEFAULT_DISPLAY_WIDTH, MAX_TEXT_CHARS, PcLinkSession, display_text
 from philips_pc_link_core import (
     LEARNABLE_ACTIONS,
     RadioButtonListener,
+    WindowsPcLinkHost,
     app_root,
+    app_version,
     capture_next_report,
     default_log_path,
     detect_profile,
+    ensure_pc_link_mailbox,
+    find_philips_render_endpoint,
     export_log,
     get_start_with_windows,
     get_status,
@@ -42,10 +50,12 @@ from philips_pc_link_core import (
     restore_control_driver,
     set_default_output,
     set_start_with_windows,
+    set_volume_mode,
     send_pc_link_enable,
 )
 
 SINGLE_INSTANCE_NAME = "PhilipsUSBPCLinkActivator"
+MCM_RETRY_SECONDS = 10.0
 
 
 def notify_existing_instance() -> bool:
@@ -75,6 +85,7 @@ class Bridge(QObject):
     device_status = Signal(object)
     capture_done = Signal()
     sound_agent_window = Signal(bool)
+    mcm_retry = Signal(int)
 
 
 class MainWindow(QMainWindow):
@@ -91,6 +102,7 @@ class MainWindow(QMainWindow):
         self.bridge.refresh.connect(self.poll_status)
         self.bridge.device_status.connect(self.apply_status)
         self.bridge.sound_agent_window.connect(self.set_sound_agent_window)
+        self.bridge.mcm_retry.connect(self.schedule_mcm_retry)
 
         self.title_label = QLabel("Philips USB PC Link Activator for Windows")
         self.title_label.setObjectName("titleLabel")
@@ -121,6 +133,35 @@ class MainWindow(QMainWindow):
         self.auto_checkbox.setChecked(True)
         self.startup_checkbox = QCheckBox("Iniciar com o Windows")
         self.startup_checkbox.setChecked(get_start_with_windows())
+        self.display_checkbox = QCheckBox("Mostrar musica no visor do radio")
+        self.display_checkbox.setChecked(self._setting_bool("show_title", True))
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(4, MAX_TEXT_CHARS)
+        self.width_spin.setSuffix(" caracteres")
+        self.width_spin.setToolTip(
+            "Quantos caracteres cabem no visor do radio. FWM589: 8. "
+            "Textos maiores rolam automaticamente."
+        )
+        try:
+            saved_width = int(self.settings.value("display_width", DEFAULT_DISPLAY_WIDTH))
+        except (TypeError, ValueError):
+            saved_width = DEFAULT_DISPLAY_WIDTH
+        self.width_spin.setValue(max(4, min(MAX_TEXT_CHARS, saved_width)))
+        self.volume_combo = QComboBox()
+        self.volume_combo.addItem("Volume do Windows (padrao)", "windows")
+        self.volume_combo.addItem("Somente a saida Philips", "philips")
+        saved_volume = str(self.settings.value("volume_mode", "windows")).lower()
+        volume_index = self.volume_combo.findData(saved_volume)
+        self.volume_combo.setCurrentIndex(volume_index if volume_index >= 0 else 0)
+        set_volume_mode(self.selected_volume_mode())
+        self.soft_volume_checkbox = QCheckBox("Corrigir volume do Windows na saida Philips")
+        self.soft_volume_checkbox.setToolTip(
+            "O chip do radio ignora o volume do USB Audio (so o mudo funciona). "
+            "Ligado: o app aplica o volume do Windows no proprio som, como o volume do YouTube."
+        )
+        self.soft_volume_checkbox.setChecked(self._setting_bool("software_volume", True))
+        self.now_playing_label = QLabel("Tocando agora: -")
+        self.now_playing_label.setObjectName("nowPlayingLabel")
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -143,6 +184,15 @@ class MainWindow(QMainWindow):
         options.addWidget(self.startup_checkbox)
         options.addStretch(1)
 
+        media_options = QHBoxLayout()
+        media_options.addWidget(self.display_checkbox)
+        media_options.addWidget(QLabel("Visor:"))
+        media_options.addWidget(self.width_spin)
+        media_options.addSpacing(16)
+        media_options.addWidget(QLabel("Botoes de volume:"))
+        media_options.addWidget(self.volume_combo)
+        media_options.addStretch(1)
+
         device_box = QGroupBox("Aparelho")
         device_box.setObjectName("panel")
         device_layout = QVBoxLayout()
@@ -159,6 +209,9 @@ class MainWindow(QMainWindow):
         controls_box.setObjectName("panel")
         controls_layout = QVBoxLayout()
         controls_layout.addLayout(options)
+        controls_layout.addLayout(media_options)
+        controls_layout.addWidget(self.soft_volume_checkbox)
+        controls_layout.addWidget(self.now_playing_label)
         controls_layout.addLayout(advanced)
         controls_box.setLayout(controls_layout)
 
@@ -182,6 +235,7 @@ class MainWindow(QMainWindow):
                 padding: 6px 2px;
             }
             #profileLabel { color: #cbd5e1; }
+            #nowPlayingLabel { color: #93c5fd; padding: 2px 2px; }
             #statusLabel {
                 background: #1c212b;
                 border: 1px solid #303847;
@@ -240,13 +294,36 @@ class MainWindow(QMainWindow):
         self.about_button.clicked.connect(self.show_about)
         self.buttons_checkbox.stateChanged.connect(self.sync_button_listener)
         self.startup_checkbox.stateChanged.connect(self.sync_startup)
+        self.display_checkbox.stateChanged.connect(self.on_display_changed)
+        self.width_spin.valueChanged.connect(self.on_display_width_changed)
+        self.soft_volume_checkbox.stateChanged.connect(self.on_software_volume_changed)
+        self.volume_combo.currentIndexChanged.connect(self.on_volume_mode_changed)
 
-        self.radio_listener = RadioButtonListener(self.on_radio_button, self.on_button_error, detect_profile())
+        initial_profile = detect_profile()
+        # Read from the USB thread; never touch the Qt widget from there.
+        self._show_title = self.display_checkbox.isChecked()
+        self._display_width = self.width_spin.value()
+        self.media_monitor = MediaMonitor()
+        self.pc_link_host = WindowsPcLinkHost(self.media_monitor, initial_profile)
+        self.pc_link = PcLinkSession(
+            self.pc_link_host,
+            ensure_mailbox=ensure_pc_link_mailbox,
+            display_enabled=lambda: self._show_title,
+            display_width=lambda: self._display_width,
+        )
+        self.radio_listener = RadioButtonListener(
+            self.on_radio_button,
+            self.on_button_error,
+            initial_profile,
+            pc_link=self.pc_link,
+        )
+        self.radio_listener.set_buttons_enabled(self.buttons_checkbox.isChecked())
         self.radio_listener.set_device_family(self.selected_device_family())
         self._learned_map = self._load_learned_map()
         self.radio_listener.set_learned_map(self._learned_map)
         self.last_activation = 0.0
         self.last_ready = False
+        self._next_mcm_retry_at = 0.0
         self._last_auto_log = 0.0
         self._operation_lock = threading.Lock()
         self._operation_running = False
@@ -265,8 +342,67 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(10000)
 
+        self.media_monitor.start()
+        if self.media_monitor.last_error:
+            self.log(self.media_monitor.last_error)
+        self.software_volume = SoftwareVolume(
+            lambda: find_philips_render_endpoint(self.pc_link_host.profile),
+            on_status=self.bridge.log.emit,
+        )
+        self.software_volume.set_enabled(self.soft_volume_checkbox.isChecked())
+        self.now_playing_timer = QTimer(self)
+        self.now_playing_timer.timeout.connect(self.refresh_now_playing)
+        self.now_playing_timer.start(1500)
+
         self.poll_status()
         self.sync_button_listener()
+
+    def _setting_bool(self, key: str, default: bool) -> bool:
+        value = self.settings.value(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "sim"}
+        return bool(value)
+
+    def selected_volume_mode(self) -> str:
+        return str(self.volume_combo.currentData() or "windows")
+
+    def on_volume_mode_changed(self, _index: int | None = None) -> None:
+        mode = self.selected_volume_mode()
+        self.settings.setValue("volume_mode", mode)
+        set_volume_mode(mode)
+        if mode == "windows":
+            self.log("Botoes de volume do radio: volume do Windows (saida padrao).")
+        else:
+            self.log("Botoes de volume do radio: somente a saida Philips.")
+
+    def on_display_changed(self, _state: int | None = None) -> None:
+        enabled = self.display_checkbox.isChecked()
+        self._show_title = enabled
+        self.settings.setValue("show_title", enabled)
+        self.log("Musica no visor do radio: " + ("ligada." if enabled else "desligada."))
+        self.sync_button_listener()
+
+    def on_software_volume_changed(self, _state: int | None = None) -> None:
+        enabled = self.soft_volume_checkbox.isChecked()
+        self.settings.setValue("software_volume", enabled)
+        self.software_volume.set_enabled(enabled)
+
+    def on_display_width_changed(self, value: int) -> None:
+        self._display_width = int(value)
+        self.settings.setValue("display_width", int(value))
+
+    def refresh_now_playing(self) -> None:
+        info = self.media_monitor.snapshot()
+        if not info.title and not info.artist:
+            text = "Tocando agora: -"
+        else:
+            parts = [display_text(info.title, 60) or "(sem titulo)"]
+            if info.artist:
+                parts.append(display_text(info.artist, 40))
+            state = {"playing": "tocando", "paused": "pausado", "stopped": "parado"}.get(info.status, "")
+            text = "Tocando agora: " + " - ".join(parts) + (f"  [{state}]" if state else "")
+        if self.now_playing_label.text() != text:
+            self.now_playing_label.setText(text)
 
     def setup_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(self)
@@ -298,6 +434,16 @@ class MainWindow(QMainWindow):
             # Real quit (tray "Sair"): stop everything AND end the process.
             try:
                 self.radio_listener.stop()
+            except Exception:
+                pass
+            try:
+                self.media_monitor.stop()
+            except Exception:
+                pass
+            try:
+                # Returns every app to its own mixer level before quitting.
+                self.software_volume.set_enabled(False)
+                self.software_volume.stop()
             except Exception:
                 pass
             try:
@@ -351,6 +497,19 @@ class MainWindow(QMainWindow):
         else:
             self.hide()
 
+    def schedule_mcm_retry(self, delay_ms: int) -> None:
+        QTimer.singleShot(max(0, int(delay_ms)), self.retry_mcm_activation)
+
+    def retry_mcm_activation(self) -> None:
+        if (
+            self.selected_device_family() == "MCM"
+            and self.auto_checkbox.isChecked()
+            and self._control_ready
+            and not self._operation_running
+            and not self._pc_link_active
+        ):
+            self.activate_now(auto=True)
+
     def selected_device_family(self) -> str:
         return str(self.family_combo.currentData() or "FWM").upper()
 
@@ -360,6 +519,7 @@ class MainWindow(QMainWindow):
         self.radio_listener.set_device_family(family)
         self._pc_link_active = False
         self.last_activation = 0.0
+        self._next_mcm_retry_at = 0.0
         if family == "MCM":
             self.log("Modo MCM selecionado: sera usada a negociacao do Sound Agent 2.")
         else:
@@ -418,6 +578,7 @@ class MainWindow(QMainWindow):
 
         if status.profile:
             self.radio_listener.set_profile(status.profile)
+            self.pc_link_host.profile = status.profile
             self.profile_label.setText(
                 f"Perfil: {status.profile.display_name} ({status.profile.vid_pid_label})"
             )
@@ -455,10 +616,14 @@ class MainWindow(QMainWindow):
         )
         if connection_changed:
             self._pc_link_active = False
+            self._next_mcm_retry_at = 0.0
+            # A reconnected unit lost the setup block and its PC Link state.
+            self.pc_link.reset()
         self._last_usb_connection_key = status.usb_connection_key
         self._control_ready = ready
         if not ready:
             self._pc_link_active = False
+            self._next_mcm_retry_at = 0.0
         if ready and not operation_running:
             self.sync_button_listener()
         elif self.radio_listener.running:
@@ -473,7 +638,10 @@ class MainWindow(QMainWindow):
         if self.auto_checkbox.isChecked() and ready and not operation_running:
             now = time.time()
             if self.selected_device_family() == "MCM":
-                should_activate = not self._pc_link_active and (not was_ready or connection_changed)
+                retry_due = self._next_mcm_retry_at > 0 and now >= self._next_mcm_retry_at
+                should_activate = not self._pc_link_active and (
+                    not was_ready or connection_changed or retry_due
+                )
             else:
                 should_activate = not was_ready or connection_changed or now - self.last_activation > 25
             if should_activate:
@@ -518,14 +686,26 @@ class MainWindow(QMainWindow):
             self._last_auto_log = time.time()
 
         restart_listener = self.radio_listener.running
-        resume_listener = self.buttons_checkbox.isChecked() or family == "MCM"
+        resume_listener = self.listener_required()
 
         def activate_safely() -> str:
             if restart_listener:
                 self.radio_listener.stop()
             try:
-                result = send_pc_link_enable(device_family=family)
+                result = send_pc_link_enable(device_family=family, pc_link=self.pc_link)
+            except Exception:
+                self._pc_link_active = False
+                if family == "MCM":
+                    self._next_mcm_retry_at = time.time() + MCM_RETRY_SECONDS
+                    self.bridge.log.emit(
+                        f"Sound Agent: nova tentativa automatica em {MCM_RETRY_SECONDS:.0f} segundos."
+                    )
+                    self.bridge.mcm_retry.emit(int(MCM_RETRY_SECONDS * 1000))
+                raise
+            else:
                 self._pc_link_active = True
+                if family == "MCM":
+                    self._next_mcm_retry_at = 0.0
                 return result
             finally:
                 if resume_listener and self._control_ready:
@@ -555,6 +735,7 @@ class MainWindow(QMainWindow):
                 destination=chosen,
                 device_family=family,
                 app_trace=session_trace,
+                pc_link=self.pc_link,
             )
             return f"Log salvo: {saved}"
 
@@ -585,6 +766,7 @@ class MainWindow(QMainWindow):
                 result["data"] = capture_next_report(
                     timeout_s=timeout_s,
                     device_family=family,
+                    pc_link=self.pc_link,
                 )
             except Exception as exc:  # noqa: BLE001
                 result["error"] = str(exc)
@@ -673,8 +855,11 @@ class MainWindow(QMainWindow):
                 "Idealizado e testado originalmente por Rafael Jaeger.\n"
                 "Criado para recuperar o USB PC Link de aparelhos Philips antigos "
                 "em Windows modernos.\n\n"
+                f"Versao {app_version()}\n\n"
                 "FWM/FWC: ativacao PC Link padrao.\n"
-                "MCM: implementacao da inicializacao do Sound Agent 2.\n\n"
+                "MCM: inicializacao do Sound Agent 2.\n"
+                "Visor e controles: protocolo PhilipsRemote (MusicMatch) com a "
+                "musica atual do Windows.\n\n"
                 "Perfil USB: Philips Audio Set 0471:0111."
             ),
         )
@@ -687,24 +872,37 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"Erro ao alterar inicializacao: {exc}")
 
+    def listener_required(self) -> bool:
+        """The control channel must stay open to answer the unit's requests."""
+        return (
+            self.buttons_checkbox.isChecked()
+            or self.display_checkbox.isChecked()
+            or self.selected_device_family() == "MCM"
+        )
+
     def sync_button_listener(self) -> None:
-        sound_agent_required = self.selected_device_family() == "MCM"
-        if self.buttons_checkbox.isChecked() or sound_agent_required:
+        self.radio_listener.set_buttons_enabled(self.buttons_checkbox.isChecked())
+        if self.listener_required():
             if not self._control_ready:
                 return
             if time.time() < self._buttons_backoff_until:
                 return
             if not self.radio_listener.running:
                 self.radio_listener.start()
-                if sound_agent_required:
-                    self.log("Canal continuo do Sound Agent ligado.")
+                if self.selected_device_family() == "MCM":
+                    self.log("Canal continuo do Sound Agent/PC Link ligado.")
+                elif self.buttons_checkbox.isChecked():
+                    self.log("Leitor de botoes e PC Link do radio ligado.")
                 else:
-                    self.log("Leitor de botoes do radio ligado.")
-        else:
+                    self.log("Canal PC Link ligado (botoes desativados).")
+        elif self.radio_listener.running:
             self.radio_listener.stop()
             self.log("Leitor de botoes do radio desligado.")
 
     def on_radio_button(self, name: str, raw: bytes) -> None:
+        if name.startswith("PC Link:") or name.startswith("Setup Philips:"):
+            self.bridge.log.emit(name + (f" raw={raw.hex(' ')}" if raw else ""))
+            return
         if name.startswith("Sound Agent:"):
             self.bridge.log.emit(f"{name} raw={raw.hex(' ')}")
             if "pedido para abrir a interface" in name:

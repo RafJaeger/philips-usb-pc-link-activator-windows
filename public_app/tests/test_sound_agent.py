@@ -6,6 +6,7 @@ from sound_agent import (
     LEGACY_MCM_SETUP,
     SoundAgentError,
     SoundAgentState,
+    _send_framed_packet,
     handle_mcm_notification,
     initialize_mcm_sound_agent,
     is_device_status_report,
@@ -47,7 +48,7 @@ class AdvancingClock:
 
 class SoundAgentTests(unittest.TestCase):
     def test_exact_mcm_startup_and_ack(self):
-        handle = FakeHandle(a544=[3, 3, 0])
+        handle = FakeHandle(a544=[2, 2, 0])
         trace = initialize_mcm_sound_agent(
             handle,
             revision=0x0402,
@@ -69,7 +70,7 @@ class SoundAgentTests(unittest.TestCase):
                 (0xA4EF, b"\x01"),
                 (0xA4F0, b"\x02"),
                 (0xA4F4, b"\x02\xb0\x01"),
-                (0xA544, b"\x03"),
+                (0xA544, b"\x02"),
                 (0xA535, b"\x01"),
             ],
         )
@@ -83,26 +84,50 @@ class SoundAgentTests(unittest.TestCase):
                 sleep=lambda _seconds: None,
             )
 
+    def test_a544_always_receives_the_frame_length_byte(self):
+        packets = (
+            bytes.fromhex("02 B0 01"),
+            bytes.fromhex("03 6B A1 01"),
+            bytes.fromhex("06 6D 82 03 04 05 06"),
+        )
+        for packet in packets:
+            with self.subTest(packet=packet.hex(" ")):
+                handle = FakeHandle(a544=[0])
+                _send_framed_packet(
+                    handle,
+                    packet,
+                    timeout_ms=1000,
+                    ready_timeout_s=1.0,
+                    sleep=lambda _seconds: None,
+                    monotonic=AdvancingClock().monotonic,
+                )
+                writes = [(item[3], item[4]) for item in handle.writes]
+                self.assertEqual(
+                    writes,
+                    [(0xA4F4, packet), (0xA544, packet[0:1])],
+                )
+
     def test_missing_device_ack_is_failure(self):
         clock = AdvancingClock()
         with self.assertRaisesRegex(SoundAgentError, "nao confirmou"):
             initialize_mcm_sound_agent(
-                FakeHandle(a544=[3]),
+                FakeHandle(a544=[2]),
                 ready_timeout_s=0.15,
                 sleep=lambda _seconds: None,
                 monotonic=clock.monotonic,
             )
 
     def test_periodic_status_reports_are_not_buttons(self):
-        self.assertTrue(is_device_status_report(bytes.fromhex("80 4a")))
+        # 80 4a is GET_PC_PLAYER1_STATUS (answered by pc_link_protocol).
+        self.assertFalse(is_device_status_report(bytes.fromhex("80 4a")))
         self.assertTrue(is_device_status_report(bytes.fromhex("80 80")))
         self.assertFalse(is_device_status_report(bytes.fromhex("01 00")))
 
     def test_fixed_runtime_queries_receive_original_sound_agent_responses(self):
         expected = {
-            "80 6b": [(0xA535, b"\x01"), (0xA4F4, bytes.fromhex("03 6B A1 01")), (0xA544, b"\x04")],
-            "80 6c": [(0xA4F4, bytes.fromhex("02 6C 82")), (0xA544, b"\x03")],
-            "80 6d": [(0xA4F4, bytes.fromhex("06 6D 82 03 04 05 06")), (0xA544, b"\x07")],
+            "80 6b": [(0xA535, b"\x01"), (0xA4F4, bytes.fromhex("03 6B A1 01")), (0xA544, b"\x03")],
+            "80 6c": [(0xA4F4, bytes.fromhex("02 6C 82")), (0xA544, b"\x02")],
+            "80 6d": [(0xA4F4, bytes.fromhex("06 6D 82 03 04 05 06")), (0xA544, b"\x06")],
         }
         for report, writes in expected.items():
             with self.subTest(report=report):

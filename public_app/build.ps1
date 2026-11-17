@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$Clean
+    [switch]$Clean,
+    # Single portable .exe (no installer, no _internal folder).
+    [switch]$OneFile
 )
 
 Set-StrictMode -Version Latest
@@ -18,12 +20,20 @@ if ($LASTEXITCODE -ne 0) {
     throw "pip install failed (exit code $LASTEXITCODE)."
 }
 
+$name = 'Philips_PC_Link_Activator'
+$mode = '--onedir'
+if ($OneFile) {
+    $name = 'Philips_PC_Link_Activator_Portable'
+    $mode = '--onefile'
+}
+
 python -m PyInstaller `
+    $mode `
     --noconfirm `
     --clean `
     --windowed `
     --noupx `
-    --name Philips_PC_Link_Activator `
+    --name $name `
     --icon "assets\app.ico" `
     --add-data "assets;assets" `
     --add-data "driver\winusb-philips-mi03;driver\winusb-philips-mi03" `
@@ -33,9 +43,14 @@ python -m PyInstaller `
     --add-data "LICENSE;." `
     --add-data "VERSION;." `
     --add-data "THIRD_PARTY_NOTICES.md;." `
+    --collect-submodules winrt `
     app.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed (exit code $LASTEXITCODE). If dist is locked, close the running app first."
 }
 
-Write-Host "Build ready: $AppRoot\dist\Philips_PC_Link_Activator"
+if ($OneFile) {
+    Write-Host "Build ready: $AppRoot\dist\$name.exe"
+} else {
+    Write-Host "Build ready: $AppRoot\dist\$name"
+}

@@ -2,13 +2,15 @@
 
 Date: 2026-07-22
 
-Update 2026-11-11: Rafael reports working app playback on FWM589, FWM779,
+Update 2026-11-17: Rafael reports working app playback on FWM589, FWM779,
 FWC577, FWM922 and FWM992. MCM units with USB PC Link (MCM530/MCM570/MCM590/
 MCM595) enumerate as the same `0471:0111` device and are recognized by the
-app, but MCM playback is not yet confirmed on modern Windows. The app sends a
-single validated activation (A4EF=01, A4F0=FF) to every unit. The evidence
-table below records the earlier research, not the latest Windows playback
-status.
+app, but MCM playback is not yet confirmed on modern Windows. Current builds
+use the validated two-write activation in FWM/FWC mode and the reconstructed
+Philips Sound Agent 2 startup plus runtime dispatcher in MCM mode. The explicit
+family selection is necessary because both families can share the same USB
+descriptors. The evidence table below includes older research; physical MCM
+playback remains the final validation step.
 
 This note tracks known and likely Philips "USB PC Link" systems for the public
 app. It does not change code. The safest initial support target is the Philips
@@ -17,7 +19,8 @@ composite USB audio family that enumerates as `Philips Audio Set` with
 
 ## Known protocol
 
-For `0471:0111`, the working activation sequence is two vendor control writes:
+For `0471:0111` FWM/FWC units, the locally validated activation sequence is
+two vendor control writes:
 
 ```text
 bmRequestType = 0x40, bRequest = 0x04, wValue = 0x0000, wIndex = 0xa4ef, data = 01
@@ -61,9 +64,9 @@ Sources:
 2. On Windows, do not replace the whole composite device and do not replace the
    audio streaming interface. The working FWM589 setup only replaced the control
    interface `MI_03` with WinUSB; `MI_00` stayed on `usbaudio`.
-3. Activation is not permanent. The helper and our local test both indicate that
-   the two-packet command must be resent after USB reconnect and often after
-   leaving/returning to PC Link.
+3. Activation is not permanent. FWM/FWC mode resends the two-write sequence
+   after reconnect or mode changes. MCM mode runs the Sound Agent startup,
+   maintains its request/response channel and retries a failed startup.
 4. Add `PID_0110` only as an experimental/manual mode. The old Philips INF lists
    it, but no public model-to-ID confirmation was found during this pass.
 5. Do not auto-target generic Philips USB devices. Vendor `0471` covers many

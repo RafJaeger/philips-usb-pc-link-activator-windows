@@ -4,3 +4,8 @@ libusb-package>=1.0
 pycaw
 comtypes>=1.4
 pyinstaller>=6.0
+winrt-runtime>=3.2
+winrt-Windows.Foundation>=3.2
+winrt-Windows.Foundation.Collections>=3.2
+winrt-Windows.Media.Control>=3.2
+winrt-Windows.Storage.Streams>=3.2

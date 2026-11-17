@@ -12,10 +12,11 @@ Windows as `Philips Audio Set` with USB ID `0471:0111`.
 
 ## Current Status
 
-- Restores PC Link activation with the known Philips wake-up sequence.
+- Restores PC Link with the standard FWM/FWC wake-up sequence or the MCM Sound Agent 2 negotiation.
 - Keeps Windows USB Audio on `MI_00`.
 - Installs WinUSB only on the control interface `MI_03`.
-- Reactivates PC Link after reconnects and mode changes.
+- Reactivates PC Link after reconnects and retries failed MCM activation automatically.
+- Saves the explicit FWM/FWC or MCM selection because the shared USB descriptors cannot distinguish them safely.
 - Maps radio buttons to Windows media controls.
 - Includes diagnostics for remote-control button capture and new model support.
 
