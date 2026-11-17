@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 from PySide6.QtCore import QTimer, Signal, QObject, QSettings, QEventLoop, Qt
-from PySide6.QtGui import QAction, QActionGroup, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Philips USB PC Link Activator for Windows")
-        self.resize(1120, 860)
+        self._density = None
         self.app_icon = QIcon(str(app_root() / "assets" / "app.ico"))
         self.setWindowIcon(self.app_icon)
 
@@ -323,6 +323,8 @@ class MainWindow(QMainWindow):
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
+        self.sidebar = sidebar
+        self._nav_labels: list[tuple[str, str]] = []
         nav_layout = QVBoxLayout()
         nav_layout.setContentsMargins(10, 12, 10, 12)
         nav_layout.setSpacing(6)
@@ -340,6 +342,9 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(page)
             button = QPushButton(label)
             button.setObjectName("navButton")
+            icon, _, name = label.partition("   ")
+            self._nav_labels.append((icon, label))
+            button.setToolTip(name)
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, i=index: self.show_page(i))
             nav_group.addButton(button)
@@ -347,6 +352,7 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(button)
         nav_layout.addStretch(1)
         version = QLabel(f"versao {app_version()}")
+        self.sidebar_version = version
         version.setObjectName("fieldHelp")
         version.setAlignment(Qt.AlignCenter)
         nav_layout.addWidget(version)
@@ -373,6 +379,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         self.setStyleSheet(STYLESHEET)
+        self.setMinimumSize(640, 460)
+        self._fit_to_screen()
 
         self.install_button.clicked.connect(self.install_driver)
         self.activate_button.clicked.connect(self.activate_now)
@@ -587,6 +595,46 @@ class MainWindow(QMainWindow):
             "Controle: botoes do radio e do controle remoto viram comandos do Windows.",
         )
 
+    # ----- size and density -----
+
+    def _fit_to_screen(self) -> None:
+        """Open at a comfortable size that always fits the screen."""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1120, 860)
+            return
+        area = screen.availableGeometry()
+        width = min(1120, int(area.width() * 0.92))
+        height = min(880, int(area.height() * 0.9))
+        self.resize(max(640, width), max(460, height))
+        self.move(area.x() + (area.width() - self.width()) // 2, area.y() + (area.height() - self.height()) // 2)
+        self._apply_density()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt name
+        super().resizeEvent(event)
+        self._apply_density()
+
+    def _apply_density(self) -> None:
+        """Narrow window: icon-only sidebar. Short window: compact header and LCD."""
+        if not hasattr(self, "sidebar"):
+            return
+        narrow = self.width() < 980
+        short = self.height() < 740
+        density = (narrow, short)
+        if density == self._density:
+            return
+        self._density = density
+        self.sidebar.setFixedWidth(76 if narrow else 220)
+        self.sidebar_version.setVisible(not narrow)
+        for button, (icon, label) in zip(self.nav_buttons, self._nav_labels):
+            button.setText(icon if narrow else label)
+            button.setProperty("compact", narrow)
+            button.setProperty("short", short)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self.header.set_compact(short)
+        self.lcd.set_compact(short)
+
     # ----- page building blocks -----
 
     def _page(self, title: str, subtitle: str, *widgets) -> QWidget:
@@ -604,7 +652,8 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Never cut a page: scroll sideways only if the window is too narrow.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setWidget(inner)
         return scroll
 

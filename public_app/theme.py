@@ -157,6 +157,8 @@ QPushButton#navButton {{
     color: {SILVER_TEXT}; border: 1px solid transparent; border-radius: 10px; background: transparent;
 }}
 QPushButton#navButton:hover {{ background: #262c35; border-color: {PANEL_EDGE}; }}
+QPushButton#navButton[compact="true"] {{ text-align: center; padding: 12px 4px; font-size: 20px; }}
+QPushButton#navButton[short="true"] {{ padding-top: 8px; padding-bottom: 8px; }}
 QPushButton#navButton:checked {{
     color: #101318; border: 1px solid #8e959e;
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f2f4f6, stop:0.5 #c9ced4, stop:1 #aab1b9);
@@ -236,6 +238,10 @@ class HeaderBar(QFrame):
         self.setLayout(layout)
         self.set_led("off", "AGUARDANDO")
 
+    def set_compact(self, compact: bool) -> None:
+        """Short windows: hide the subtitle line."""
+        self.subtitle.setVisible(not compact)
+
     def set_led(self, state: str, text: str) -> None:
         color = {"on": LED_ON, "wait": LED_WAIT}.get(state, LED_OFF)
         glow = color if state in ("on", "wait") else "#2a3039"
@@ -277,14 +283,27 @@ class LcdPanel(QFrame):
         glass_layout.addWidget(self.text)
         glass_layout.addLayout(row)
         glass.setLayout(glass_layout)
-        caption = QLabel("VISOR DO RADIO")
-        caption.setObjectName("lcdCaption")
-        caption.setAlignment(Qt.AlignCenter)
-        outer = QVBoxLayout()
-        outer.setContentsMargins(10, 8, 10, 6)
-        outer.addWidget(glass)
-        outer.addWidget(caption)
-        self.setLayout(outer)
+        self.caption = QLabel("VISOR DO RADIO")
+        self.caption.setObjectName("lcdCaption")
+        self.caption.setAlignment(Qt.AlignCenter)
+        self._glass_layout = glass_layout
+        self._outer = QVBoxLayout()
+        self._outer.setContentsMargins(10, 8, 10, 6)
+        self._outer.addWidget(glass)
+        self._outer.addWidget(self.caption)
+        self.setLayout(self._outer)
+        self._compact = False
+
+    def set_compact(self, compact: bool) -> None:
+        """Short windows: smaller digits, no caption, tighter margins."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.caption.setVisible(not compact)
+        size = 24 if compact else 34
+        self.text.setStyleSheet(f"font-size: {size}px;")
+        self._glass_layout.setContentsMargins(18, 4 if compact else 10, 18, 4 if compact else 10)
+        self._outer.setContentsMargins(8, 5 if compact else 8, 8, 5 if compact else 6)
 
     def set_text(self, window: str | None, width: int) -> None:
         shown = (window or "").upper().ljust(width)[:width] if window else "-" * width
@@ -329,7 +348,7 @@ class StepRow(QFrame):
         layout.addWidget(self.mark)
         layout.addLayout(texts, 1)
         if button is not None:
-            button.setMinimumWidth(230)
+            button.setMinimumWidth(190)
             layout.addWidget(button)
         self.setLayout(layout)
         self.set_state("idle", "")
