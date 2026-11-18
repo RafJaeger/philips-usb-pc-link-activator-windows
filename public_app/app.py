@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import admin_tasks
 from display_modes import EFFECT_NAMES, EFFECTS, MODE_NAMES, MODES, DisplayComposer
 from media_session import MediaMonitor
 from notifications import NotificationWatcher
@@ -1428,6 +1429,10 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    # Elevated copy opened by the app for one admin task: no window, no tray.
+    if admin_tasks.is_admin_invocation(sys.argv):
+        return admin_tasks.main(sys.argv)
+
     app = QApplication(sys.argv)
     QApplication.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(str(app_root() / "assets" / "app.ico")))

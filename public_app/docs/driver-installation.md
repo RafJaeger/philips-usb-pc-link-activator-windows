@@ -59,7 +59,9 @@ Before calling `pnputil`, the installer must verify:
 - The INF text does not define `VID_0471&PID_0111&MI_00`.
 - The catalog file exists.
 
-The helper script `scripts/install-winusb-mi03.ps1` performs these checks.
+The app performs these checks itself (`admin_tasks.install_driver`, run in an
+elevated copy of the app). The script `scripts/install-winusb-mi03.ps1` does
+the same for manual use; it is not shipped inside the executable.
 
 ## Signing policy
 
@@ -82,7 +84,8 @@ production installer should not need that switch.
 ## Restore flow
 
 Restoration should remove only the WinUSB package currently assigned to `MI_03`.
-The helper script `scripts/restore-mi03-hid.ps1`:
+The app (`admin_tasks.restore_driver`) and the manual script
+`scripts/restore-mi03-hid.ps1`:
 
 1. Finds the connected `USB\VID_0471&PID_0111&MI_03` device node.
 2. Verifies that it is currently using WinUSB.

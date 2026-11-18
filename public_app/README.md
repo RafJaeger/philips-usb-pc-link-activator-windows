@@ -142,6 +142,17 @@ sidebar (Inicio, Visor, Som, Controle, Configuracoes, Log) plus a complete
 menu bar with every option. The home page is a 3-step checklist (WinUSB
 driver, PC Link active, stereo as Windows output), each step with its button.
 
+## No PowerShell (0.6.1)
+
+The app never starts PowerShell. Device status is read directly from Windows
+(SetupAPI, the same data Device Manager shows). Installing the driver, giving
+the control back to Windows and enabling the equalizer re-open the app itself
+as administrator (the normal UAC prompt) and do the work in Python, calling
+`pnputil` for the driver store. Earlier versions ran hidden PowerShell scripts,
+which some antivirus engines flagged (Kaspersky: `Trojan.Win32.PyPower`). The
+scripts in `scripts/` remain for manual troubleshooting only and are not
+shipped inside the executable.
+
 ## Display Modes
 
 Modes: music (title and artist as separate pages), clock, PC (CPU/RAM),

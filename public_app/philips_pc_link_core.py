@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -13,6 +12,9 @@ from typing import Callable
 
 import comtypes
 import usb1
+
+import admin_tasks
+import pnp_devices
 from pycaw.pycaw import AudioUtilities, ERole
 
 import platform
@@ -188,82 +190,12 @@ def get_start_with_windows() -> bool:
         return False
 
 
-def _hidden_subprocess_options() -> dict:
-    if os.name != "nt":
-        return {}
-
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        "startupinfo": startupinfo,
-    }
-
-
-def _run_powershell(script: str, elevated: bool = False) -> subprocess.CompletedProcess:
-    if elevated:
-        script_path = os.environ.get("TEMP", str(Path.home()))
-        path = Path(script_path) / "philips_pc_link_driver_install.ps1"
-        path.write_text(script, encoding="utf-8")
-        command = [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            f"Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{path}\"'",
-        ]
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **_hidden_subprocess_options(),
-        )
-
-    return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_hidden_subprocess_options(),
-    )
-
-
-def run_elevated_script(script: Path, arguments: list[str], *, label: str) -> tuple[int, str]:
-    """Run a .ps1 as administrator (UAC) and return (exit code, its output)."""
-    temp = Path(os.environ.get("TEMP", str(Path.home())))
-    log = temp / f"philips_pc_link_{label}.log"
-    wrapper = temp / f"philips_pc_link_{label}.ps1"
-    # Parameter names (-Installer, -Remove) stay bare; values are quoted.
-    quoted = " ".join(
-        str(arg) if str(arg).startswith("-") else "'" + str(arg).replace("'", "''") + "'"
-        for arg in arguments
-    )
-    wrapper.write_text(
-        "$ErrorActionPreference = 'Continue'\r\n"
-        f"try {{ & '{script}' {quoted} *>&1 | Out-File -FilePath '{log}' -Encoding utf8; exit 0 }}\r\n"
-        f"catch {{ ('ERRO: ' + $_.Exception.Message) | Out-File -FilePath '{log}' -Append -Encoding utf8; exit 1 }}\r\n",
-        encoding="utf-8-sig",
-    )
-    if log.exists():
-        log.unlink()
-    command = [
-        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-        "$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
-        f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{wrapper}\"'; exit $p.ExitCode",
-    ]
-    result = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **_hidden_subprocess_options(),
-    )
-    output = log.read_text(encoding="utf-8-sig", errors="replace") if log.exists() else ""
-    if result.returncode != 0 and not output:
-        output = (result.stdout + "\n" + result.stderr).strip() or "Permissao de administrador negada."
-    return result.returncode, output.strip()
+def _admin(task: str, arguments: list[str] | None = None, failure: str = "Falha.") -> str:
+    """Run a task as administrator in a copy of this app (UAC); raise on failure."""
+    code, output = admin_tasks.run_as_admin(task, arguments)
+    if code != 0:
+        raise RuntimeError(output or failure)
+    return output
 
 
 EQUALIZER_INSTALLER = ("vendor", "equalizerapo", "EqualizerAPO-x64-1.4.2.exe")
@@ -275,31 +207,15 @@ def equalizer_installer_path() -> Path:
 
 def install_equalizer() -> str:
     """Install Equalizer APO (bundled) and enable it on the Philips output."""
-    script = app_root() / "scripts" / "install-equalizer.ps1"
     installer = equalizer_installer_path()
     if not installer.exists():
         raise FileNotFoundError(f"Instalador do Equalizer APO ausente: {installer}")
-    code, output = run_elevated_script(script, ["-Installer", str(installer)], label="equalizer")
-    if code != 0:
-        raise RuntimeError(output or "Falha ao ativar o equalizador.")
-    return output
+    return _admin("equalizer-install", [str(installer)], "Falha ao ativar o equalizador.")
 
 
 def remove_equalizer() -> str:
     """Restore the Philips output (Equalizer APO stays installed)."""
-    script = app_root() / "scripts" / "install-equalizer.ps1"
-    code, output = run_elevated_script(script, ["-Remove"], label="equalizer")
-    if code != 0:
-        raise RuntimeError(output or "Falha ao remover o equalizador.")
-    return output
-
-
-def _profile_instance_filter(profile: DeviceProfile) -> str:
-    return f"VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}"
-
-
-def _parse_bool(value: str | None) -> bool:
-    return str(value or "").strip().lower() == "true"
+    return _admin("equalizer-remove", None, "Falha ao remover o equalizador.")
 
 
 def _read_usb_interface_service(profile: DeviceProfile) -> str | None:
@@ -329,48 +245,27 @@ def _read_usb_interface_service(profile: DeviceProfile) -> str | None:
     return None
 
 
+def _usb_prefix(profile: DeviceProfile) -> str:
+    return f"USB\\VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}"
+
+
 def _get_pnp_status(profile: DeviceProfile) -> PnpStatus:
-    id_filter = _profile_instance_filter(profile)
-    control_like = f"USB\\VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}&{profile.control_hardware_id_suffix}\\*"
-    audio_like = f"{profile.audio_hardware_prefix}\\*"
-    script = rf"""
-function Test-Present($Device) {{
-  $prop = Get-PnpDeviceProperty -InstanceId $Device.InstanceId -KeyName 'DEVPKEY_Device_IsPresent' -ErrorAction SilentlyContinue
-  return [bool]($prop -and $prop.Data -eq $true)
-}}
-
-$devices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
-  $_.InstanceId -match '{id_filter}' -or $_.FriendlyName -match 'Philips Audio Set'
-}})
-
-$seen = [bool]($devices | Where-Object {{ $_.InstanceId -like 'USB\VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}*' }})
-$presentDevices = @($devices | Where-Object {{ Test-Present $_ }})
-$present = [bool]($presentDevices | Where-Object {{ $_.InstanceId -like 'USB\VID_{profile.vendor_id:04X}&PID_{profile.product_id:04X}*' }})
-$audio = [bool]($presentDevices | Where-Object {{ $_.InstanceId -like '{audio_like}' -or ($_.FriendlyName -like '*Philips Audio Set*' -and $_.Class -eq 'AudioEndpoint') }})
-$mi03 = $devices | Where-Object {{ $_.InstanceId -like '{control_like}' }} | Select-Object -First 1
-$service = ''
-if ($mi03) {{
-  $prop = Get-PnpDeviceProperty -InstanceId $mi03.InstanceId -KeyName 'DEVPKEY_Device_Service' -ErrorAction SilentlyContinue
-  if ($prop) {{ $service = [string]$prop.Data }}
-}}
-"seen=$seen"
-"present=$present"
-"audio=$audio"
-"service=$service"
-"""
-    result = _run_powershell(script)
-    values: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip()
-
+    """What Windows knows about the radio, read directly through SetupAPI."""
+    try:
+        devices = pnp_devices.find_devices(_usb_prefix(profile))
+    except OSError:
+        devices = []
+    control_prefix = profile.control_hardware_id.upper() + "\\"
+    audio_prefix = profile.audio_hardware_prefix.upper() + "\\"
+    controls = [d for d in devices if d.instance_id.upper().startswith(control_prefix)]
+    # The node that is plugged in now wins over old ones from other USB ports.
+    control = next((d for d in controls if d.present), controls[0] if controls else None)
     return PnpStatus(
         profile=profile,
-        seen=_parse_bool(values.get("seen")),
-        present=_parse_bool(values.get("present")),
-        service=values.get("service") or None,
-        audio_present=_parse_bool(values.get("audio")),
+        seen=bool(devices),
+        present=any(d.present for d in devices),
+        service=control.service if control else None,
+        audio_present=any(d.present and d.instance_id.upper().startswith(audio_prefix) for d in devices),
     )
 
 
@@ -472,49 +367,13 @@ def decode_button_report(
 def install_winusb_driver(profile: DeviceProfile | None = None) -> None:
     active_profile = profile or detect_profile() or default_profile()
     package = driver_dir(active_profile)
-    install_script = app_root() / "scripts" / "install-winusb-mi03.ps1"
-    if install_script.exists() and active_profile.profile_id == "philips-uac3553b-0471-0111":
-        script = rf"""
-$ErrorActionPreference = 'Stop'
-& '{install_script}' -DriverDirectory '{package}' -AcceptLocalTestCertificate
-"""
-        result = _run_powershell(script, elevated=True)
-        if result.returncode != 0:
-            raise RuntimeError((result.stdout + "\n" + result.stderr).strip())
-        return
-
-    inf = next(package.glob("*.inf"), None)
-    cert = next(package.glob("*.cer"), None)
-    if inf is None or cert is None or not inf.exists() or not cert.exists():
-        raise FileNotFoundError(f"Driver package is incomplete: {package}")
-
-    script = rf"""
-$ErrorActionPreference = 'Stop'
-$cert = '{cert}'
-$inf = '{inf}'
-Import-Certificate -FilePath $cert -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-Import-Certificate -FilePath $cert -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
-pnputil /add-driver $inf /install
-pnputil /scan-devices
-"""
-    result = _run_powershell(script, elevated=True)
-    if result.returncode != 0:
-        raise RuntimeError((result.stdout + "\n" + result.stderr).strip())
+    if not package.exists():
+        raise FileNotFoundError(f"Pacote do driver ausente: {package}")
+    _admin("install-driver", [str(package)], "Falha ao instalar o driver WinUSB.")
 
 
 def restore_control_driver(profile: DeviceProfile | None = None) -> None:
-    active_profile = profile or detect_profile() or default_profile()
-    restore_script = app_root() / "scripts" / "restore-mi03-hid.ps1"
-    if not restore_script.exists() or active_profile.profile_id != "philips-uac3553b-0471-0111":
-        raise FileNotFoundError("Restore script is not available for this profile.")
-
-    script = rf"""
-$ErrorActionPreference = 'Stop'
-& '{restore_script}'
-"""
-    result = _run_powershell(script, elevated=True)
-    if result.returncode != 0:
-        raise RuntimeError((result.stdout + "\n" + result.stderr).strip())
+    _admin("restore-driver", None, "Falha ao restaurar o controle HID.")
 
 
 def _find_device(ctx: usb1.USBContext, profile: DeviceProfile):
@@ -936,26 +795,13 @@ def export_log(
     if app_trace.strip():
         header.extend(("Log da sessao:", app_trace.strip(), ""))
 
-    script = rf"""
-"Dispositivos PnP:"
-Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
-  $_.InstanceId -match 'VID_{active_profile.vendor_id:04X}&PID_{active_profile.product_id:04X}|Philips Audio Set'
-}} | Format-List Status,Class,FriendlyName,InstanceId
-""
-"Propriedades do driver:"
-Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{
-  $_.InstanceId -match 'VID_{active_profile.vendor_id:04X}&PID_{active_profile.product_id:04X}'
-}} | ForEach-Object {{
-  $_.InstanceId
-  Get-PnpDeviceProperty -InstanceId $_.InstanceId -ErrorAction SilentlyContinue |
-    Where-Object {{ $_.KeyName -match 'Service|DriverInfPath|DriverDesc|HardwareIds|CompatibleIds|BusReportedDeviceDesc' }} |
-    Format-Table -AutoSize KeyName,Data
-}}
-"""
-    result = _run_powershell(script)
+    try:
+        devices = pnp_devices.describe(pnp_devices.find_devices(_usb_prefix(active_profile)))
+    except OSError as exc:
+        devices = f"(nao foi possivel listar: {exc})"
     topology = describe_usb_topology(active_profile)
 
-    body = "\n".join(header) + result.stdout + "\n" + result.stderr + "\n" + topology + "\n"
+    body = "\n".join(header) + "Dispositivos PnP:\n" + devices + "\n\n" + topology + "\n"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")
     return destination

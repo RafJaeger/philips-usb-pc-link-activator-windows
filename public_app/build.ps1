@@ -36,6 +36,32 @@ if ($LASTEXITCODE -ne 0) {
     throw "pip install failed (exit code $LASTEXITCODE)."
 }
 
+# Version resource (name, company, description) shown in the file properties.
+$version = (Get-Content -Raw (Join-Path $AppRoot 'VERSION')).Trim()
+$parts = @($version.Split('.') | ForEach-Object { [int]$_ })
+while ($parts.Count -lt 4) { $parts += 0 }
+$tuple = ($parts[0..3] -join ', ')
+$versionFile = Join-Path $AppRoot 'build\version_info.txt'
+New-Item -ItemType Directory -Force -Path (Split-Path $versionFile) | Out-Null
+@"
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=($tuple), prodvers=($tuple), mask=0x3f, flags=0x0, OS=0x40004,
+    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable(u'041604B0', [
+      StringStruct(u'CompanyName', u'RafJaeger'),
+      StringStruct(u'FileDescription', u'Philips USB PC Link Activator for Windows'),
+      StringStruct(u'FileVersion', u'$version'),
+      StringStruct(u'InternalName', u'Philips_PC_Link_Activator'),
+      StringStruct(u'LegalCopyright', u'MIT License - github.com/RafJaeger/philips-usb-pc-link-activator-windows'),
+      StringStruct(u'OriginalFilename', u'Philips_PC_Link_Activator.exe'),
+      StringStruct(u'ProductName', u'Philips USB PC Link Activator'),
+      StringStruct(u'ProductVersion', u'$version')])]),
+    VarFileInfo([VarStruct(u'Translation', [1046, 1200])])
+  ]
+)
+"@ | Set-Content -Encoding UTF8 $versionFile
+
 $name = 'Philips_PC_Link_Activator'
 $mode = '--onedir'
 if ($OneFile) {
@@ -51,9 +77,9 @@ python -m PyInstaller `
     --noupx `
     --name $name `
     --icon "assets\app.ico" `
+    --version-file $versionFile `
     --add-data "assets;assets" `
     --add-data "driver\winusb-philips-mi03;driver\winusb-philips-mi03" `
-    --add-data "scripts;scripts" `
     --add-data "docs;docs" `
     --add-data "AUTHORS.md;." `
     --add-data "LICENSE;." `
