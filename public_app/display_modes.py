@@ -188,6 +188,28 @@ def pages_window(pages: list[str], width: int, elapsed: float, effect: str) -> s
     return page_window(pages[-1], width, 0.0, effect)
 
 
+APP_NAME_S = 2.0  # notification: how long the app name stays
+
+
+def _notification_timings(pages: list[str]) -> list[Timing]:
+    return [Timing(APP_NAME_S, HOLD_S, END_HOLD_S) if i == 0 else PAGE_TIMING for i in range(len(pages))]
+
+
+def notification_duration(pages: list[str], width: int) -> float:
+    return sum(page_duration(p, width, "scroll", t) for p, t in zip(pages, _notification_timings(pages)))
+
+
+def notification_window(pages: list[str], width: int, elapsed: float) -> str:
+    """Pages shown once (no repeat): app name, then title, then message."""
+    for page, timing in zip(pages, _notification_timings(pages)):
+        duration = page_duration(page, width, "scroll", timing)
+        if elapsed < duration:
+            return page_window(page, width, elapsed, "scroll", timing)
+        elapsed -= duration
+    last = pages[-1]
+    return page_window(last, width, page_duration(last, width, "scroll"), "scroll")
+
+
 def format_rate(bytes_per_s: float) -> str:
     """Network speed in 4 characters: 850K, 1.2M, 12M (bytes per second)."""
     value = max(0.0, float(bytes_per_s))
@@ -247,6 +269,7 @@ class _Notice:
     text: str
     until: float
     started: float
+    pages: tuple[str, ...] = ()
 
 
 class DisplayComposer:
@@ -335,6 +358,21 @@ class DisplayComposer:
         if self.notices_enabled:
             self._show(text, now, seconds)
 
+    def notify_pages(self, pages: list[str], now: float) -> None:
+        """A Windows notification: app name (still), then title/message pages.
+
+        Shown at once on top of the current mode; each page stays still when
+        it fits and scrolls once when it does not.
+        """
+        # Has its own option in the app; not tied to the volume/pause notices.
+        clean = [display_text(page, 80) for page in pages]
+        clean = [page for page in clean if page]
+        if not clean:
+            return
+        with self._lock:
+            duration = notification_duration(clean, self.width)
+            self._notice = _Notice(clean[0].upper(), now + duration, now, tuple(clean))
+
     def _show(self, text: str, now: float, seconds: float, *, force: bool = False) -> None:
         with self._lock:
             clean = display_text(text, 80).upper()
@@ -410,6 +448,8 @@ class DisplayComposer:
             if notice is not None:
                 if now < notice.until:
                     # Notices and mode names never scroll: still and centered.
+                    if notice.pages:
+                        return notification_window(list(notice.pages), self.width, now - notice.started)
                     return fit(notice.text, self.width)
                 self._notice = None
                 self._content_key = None  # resume with the intro effect

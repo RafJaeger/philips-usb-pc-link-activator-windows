@@ -251,3 +251,26 @@ class SessionIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotificationDisplayTests(unittest.TestCase):
+    def test_notification_pages_show_once_then_mode_resumes(self):
+        from display_modes import notification_duration, notification_window
+
+        pages = ["Discord", "Rafael enviou uma mensagem", "oi"]
+        self.assertEqual(notification_window(pages, 8, 0.5), "Discord ")
+        self.assertEqual(notification_window(pages, 8, 2.1), "Rafael e")
+        self.assertEqual(notification_window(pages, 8, notification_duration(pages, 8) - 0.1), "   oi   ")
+        item = composer()
+        item.window(0.0, SONG, 8)
+        item.notify_pages(pages, 1.0)
+        self.assertEqual(item.window(1.1, SONG, 8), "Discord ")
+        end = 1.0 + notification_duration(pages, 8)
+        self.assertEqual(item.window(end + 0.1, SONG, 8), "Andromed")
+
+    def test_notifications_are_independent_of_volume_notices(self):
+        item = composer()
+        item.window(0.0, SONG, 8)
+        item.notices_enabled = False
+        item.notify_pages(["Discord", "Rafael"], 1.0)
+        self.assertEqual(item.window(1.1, SONG, 8), "Discord ")

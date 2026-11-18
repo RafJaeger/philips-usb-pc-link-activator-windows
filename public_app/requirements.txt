@@ -9,3 +9,6 @@ winrt-Windows.Foundation>=3.2
 winrt-Windows.Foundation.Collections>=3.2
 winrt-Windows.Media.Control>=3.2
 winrt-Windows.Storage.Streams>=3.2
+winrt-Windows.UI.Notifications>=3.2
+winrt-Windows.UI.Notifications.Management>=3.2
+winrt-Windows.ApplicationModel>=3.2

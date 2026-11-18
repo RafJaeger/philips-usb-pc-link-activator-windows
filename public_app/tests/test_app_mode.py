@@ -70,6 +70,17 @@ class FakeMediaMonitor:
         return "fake"
 
 
+class FakeNotificationWatcher:
+    def __init__(self, *_args, **_kwargs):
+        self.running = False
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+
 class FakeSoftwareVolume:
     def __init__(self, *_args, **_kwargs):
         self.enabled = False
@@ -98,8 +109,10 @@ class AppModeTests(unittest.TestCase):
             app.MediaMonitor,
             app.SoftwareVolume,
             app.find_philips_render_endpoint_fast,
+            app.NotificationWatcher,
         )
         app.QSettings = FakeSettings
+        app.NotificationWatcher = FakeNotificationWatcher
         # Never touch the real Philips chip from the tests.
         app.find_philips_render_endpoint_fast = lambda: None
         app.RadioButtonListener = FakeListener
@@ -119,6 +132,7 @@ class AppModeTests(unittest.TestCase):
             app.MediaMonitor,
             app.SoftwareVolume,
             app.find_philips_render_endpoint_fast,
+            app.NotificationWatcher,
         ) = self.originals
 
     def test_mcm_selection_is_persisted_and_used_for_activation(self):
@@ -170,6 +184,25 @@ class AppModeTests(unittest.TestCase):
             window._force_quit = True
             window.close()
         self.assertTrue(window.software_volume.stopped)
+
+    def test_windows_notification_goes_to_display_without_body_by_default(self):
+        from notifications import WindowsNotification
+
+        window = app.MainWindow()
+        window.auto_checkbox.setChecked(False)
+        try:
+            self.assertTrue(window.notification_watcher.running)
+            window.on_windows_notification(WindowsNotification("Discord", "Rafael", "segredo"))
+            notice = window.display._notice
+            self.assertEqual(notice.pages, ("Discord", "Rafael"))
+            window.notify_body_checkbox.setChecked(True)
+            window.on_windows_notification(WindowsNotification("Discord", "Rafael", "oi"))
+            self.assertEqual(window.display._notice.pages, ("Discord", "Rafael", "oi"))
+            window.notify_checkbox.setChecked(False)
+            self.assertFalse(window.notification_watcher.running)
+        finally:
+            window._force_quit = True
+            window.close()
 
     def test_display_and_volume_options_are_persisted(self):
         window = app.MainWindow()

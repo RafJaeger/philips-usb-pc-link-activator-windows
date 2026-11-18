@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from display_modes import EFFECT_NAMES, EFFECTS, MODE_NAMES, MODES, DisplayComposer
 from media_session import MediaMonitor
+from notifications import NotificationWatcher
 from software_volume import SoftwareVolume
 from tone_control import ChipTone
 from ui_equalizer import EqualizerPanel
@@ -167,6 +168,10 @@ class MainWindow(QMainWindow):
         self.free_text_edit = QLineEdit(str(self.settings.value("display_text", "") or ""))
         self.free_text_edit.setMaxLength(80)
         self.free_text_edit.setPlaceholderText("Texto livre para o modo Texto (ex.: BOA NOITE)")
+        self.notify_checkbox = QCheckBox("Mostrar notificacoes do Windows no visor")
+        self.notify_checkbox.setChecked(self._setting_bool("windows_notifications", True))
+        self.notify_body_checkbox = QCheckBox("Mostrar tambem o texto das mensagens")
+        self.notify_body_checkbox.setChecked(self._setting_bool("notification_body", False))
         self.notices_checkbox = QCheckBox("Avisos no visor (volume, mudo, pausa)")
         self.notices_checkbox.setChecked(self._setting_bool("display_notices", True))
         self.display_hint = QLabel(
@@ -251,6 +256,16 @@ class MainWindow(QMainWindow):
                     "Como o titulo entra quando nao cabe no visor. Relogio, PC e avisos ficam parados.",
                 ),
                 self._field("Texto livre", self.free_text_edit, "Usado no modo Texto livre."),
+            ),
+            self._card(
+                "Notificacoes do Windows",
+                self.notify_checkbox,
+                self._hint(
+                    "Mensagens do WhatsApp, Discord, e-mail etc. aparecem na hora: primeiro o nome "
+                    "do app, depois o titulo. O Windows pode pedir permissao na primeira vez."
+                ),
+                self.notify_body_checkbox,
+                self._hint("Desligado por privacidade: so o app e o titulo (remetente) aparecem."),
             ),
             self._card(
                 "Ajustes",
@@ -463,6 +478,15 @@ class MainWindow(QMainWindow):
             on_level=self.on_windows_volume_level,
         )
         self.software_volume.set_enabled(self.soft_volume_checkbox.isChecked())
+        self.notification_watcher = NotificationWatcher(
+            self.on_windows_notification, on_status=self.bridge.log.emit
+        )
+        self.notify_checkbox.stateChanged.connect(self.on_notifications_changed)
+        self.notify_body_checkbox.stateChanged.connect(
+            lambda _state: self.settings.setValue("notification_body", self.notify_body_checkbox.isChecked())
+        )
+        if self.notify_checkbox.isChecked():
+            self.notification_watcher.start()
         self.now_playing_timer = QTimer(self)
         self.now_playing_timer.timeout.connect(self.refresh_now_playing)
         self.now_playing_timer.start(300)
@@ -550,6 +574,9 @@ class MainWindow(QMainWindow):
         width_menu.aboutToShow.connect(rebuild_widths)
         rebuild_widths()
         self._menu_check(display_menu, "Avisos no visor (volume, mudo, pausa)", self.notices_checkbox)
+        display_menu.addSeparator()
+        self._menu_check(display_menu, "Notificacoes do Windows no visor", self.notify_checkbox)
+        self._menu_check(display_menu, "Mostrar o texto das mensagens", self.notify_body_checkbox)
         self._menu_button(display_menu, "Editar texto livre...", self.edit_free_text)
 
         sound_menu = bar.addMenu("&Som")
@@ -814,6 +841,23 @@ class MainWindow(QMainWindow):
 
         self.run_bg("Removendo o equalizador da saida Philips. Aceite o UAC.", remove_safely)
 
+    def on_notifications_changed(self, _state: int | None = None) -> None:
+        enabled = self.notify_checkbox.isChecked()
+        self.settings.setValue("windows_notifications", enabled)
+        if enabled:
+            self.notification_watcher.start()
+        else:
+            self.notification_watcher.stop()
+            self.log("Notificacoes do Windows no visor: desligadas.")
+
+    def on_windows_notification(self, notification) -> None:
+        """Called from the watcher thread: show it on the display at once."""
+        pages = [notification.app, notification.title]
+        if self.notify_body_checkbox.isChecked() and notification.body:
+            pages.append(notification.body)
+        self.display.notify_pages(pages, time.monotonic())
+        self.bridge.log.emit(f"Notificacao no visor: {notification.app}")
+
     def on_windows_volume_level(self, percent: int, muted: bool) -> None:
         """Called from the volume thread: show VOL/MUDO on the display at once."""
         text = "MUDO" if muted else f"VOL {percent:3d}%"
@@ -882,6 +926,10 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.media_monitor.stop()
+            except Exception:
+                pass
+            try:
+                self.notification_watcher.stop()
             except Exception:
                 pass
             try:
