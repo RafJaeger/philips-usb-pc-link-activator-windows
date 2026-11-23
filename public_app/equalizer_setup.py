@@ -270,7 +270,7 @@ def philips_endpoints() -> list[str]:
     found = []
     for guid in subkeys(RENDER):
         name = get(rf"{RENDER}\{guid}\Properties", DEVICE_NAME_KEY)
-        if isinstance(name, str) and "philips audio set" in name.lower():
+        if isinstance(name, str) and any(n in name.lower() for n in ("philips audio set", "uac3553b")):
             found.append(guid)
     return found
 
@@ -486,15 +486,17 @@ def _write_config(install_path: Path) -> None:
         if normalized in ("", DEFAULT_142):
             if current:
                 (folder / "config.txt.original").write_text(current, encoding="utf-8")
-            text = f"# Equalizer APO - configurado pelo Philips USB PC Link Activator\r\n{INCLUDE_LINE}\r\n"
+            # "\n" only: write_text() already turns it into CRLF on Windows (a "\r\n" here
+            # became "\r\r\n" and Equalizer APO read the include name with a trailing "\r").
+            text = f"# Equalizer APO - configurado pelo Philips USB PC Link Activator\n{INCLUDE_LINE}\n"
         else:
             (folder / "config.txt.antes-philips").write_text(current, encoding="utf-8")
-            text = current.rstrip() + f"\r\n{INCLUDE_LINE}\r\n"
+            text = current.rstrip() + f"\n{INCLUDE_LINE}\n"
         config.write_text(text, encoding="utf-8")
         print("config.txt do Equalizer APO aponta para o equalizador do app.")
     app_file = folder / "philips-pc-link.txt"
     if not app_file.exists():
-        app_file.write_text("Device: Philips Audio Set\r\nDevice: all\r\n", encoding="utf-8")
+        app_file.write_text("Device: Philips Audio Set; UAC3553B\nDevice: all\n", encoding="utf-8")
 
 
 def install(installer: Path) -> None:

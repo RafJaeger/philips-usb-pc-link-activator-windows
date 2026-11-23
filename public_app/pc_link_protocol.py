@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from sound_agent import (
+    send_frame_legacy,
     read_hid_mailbox,
     read_memory,
     send_frame,
@@ -305,6 +306,14 @@ class PcLinkState:
     requests_seen: dict[int, int] = field(default_factory=dict)
 
 
+def _is_legacy_unit(handle) -> bool:
+    """0471:0110 units use the A4F2/B0A0 transport instead of the A544 mailbox."""
+    try:
+        return handle.getDevice().getProductID() == 0x0110
+    except Exception:
+        return False
+
+
 class PcLinkSession:
     """Answer one unit's PC Link requests and push title/state changes."""
 
@@ -363,7 +372,8 @@ class PcLinkSession:
         return notes
 
     def _send(self, handle, packet: bytes, *, strict_length: bool = True) -> int:
-        if not self.state.mailbox_ready and self._ensure_mailbox is not None:
+        legacy = _is_legacy_unit(handle)
+        if not legacy and not self.state.mailbox_ready and self._ensure_mailbox is not None:
             lines = self._ensure_mailbox(handle) or []
             if lines:
                 self._notes.append(
@@ -371,7 +381,7 @@ class PcLinkSession:
                 )
                 self._notes.extend(lines)
         self.state.mailbox_ready = True
-        polls = send_frame(
+        polls = (send_frame_legacy if legacy else send_frame)(
             handle,
             packet,
             timeout_ms=self._timeout_ms,

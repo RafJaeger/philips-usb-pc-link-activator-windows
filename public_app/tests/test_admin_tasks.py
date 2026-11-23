@@ -22,7 +22,11 @@ class InfCheckTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             admin_tasks.check_inf_targets_mi03_only(inf + "\n; VID_0471&PID_0111&MI_00\n")
         with self.assertRaises(RuntimeError):
-            admin_tasks.check_inf_targets_mi03_only(inf.replace("MI_03", "MI_02"))
+            admin_tasks.check_inf_targets_mi03_only(inf.replace("MI_03", "MI_01"))
+
+    def test_0110_driver_targets_only_mi02(self):
+        inf = APP_ROOT / "driver" / "winusb-philips-0110-mi02" / "philips_uac3553b_0110_mi02.inf"
+        admin_tasks.check_inf_targets_mi03_only(admin_tasks.read_inf(inf))
 
 
 class AdminEntryTests(unittest.TestCase):

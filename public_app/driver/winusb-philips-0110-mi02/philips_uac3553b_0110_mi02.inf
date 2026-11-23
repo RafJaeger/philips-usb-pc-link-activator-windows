@@ -1,0 +1,41 @@
+; WinUSB for the control interface (MI_02) of Philips UAC3553B 0471:0110.
+; Audio (MI_00/MI_01) stays on the Windows USB Audio driver.
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider    = %VendorName%
+CatalogFile = philips_uac3553b_0110_mi02.cat
+DriverVer   = 11/23/2026,1.0.0.0
+
+[Strings]
+DeviceName = "Philips UAC3553B PC Link control (Interface 2)"
+VendorName = "Philips PC Link local driver"
+DeviceID   = "VID_0471&PID_0110&MI_02"
+DeviceGUID = "{7A1D5C3E-2B64-4F0A-9C8D-5E31A0B7C4F2}"
+
+[Manufacturer]
+%VendorName% = Philips_WinUSB, NTx86, NTamd64, NTarm64
+
+[Philips_WinUSB.NTx86]
+%DeviceName% = USB_Install, USB\%DeviceID%
+
+[Philips_WinUSB.NTamd64]
+%DeviceName% = USB_Install, USB\%DeviceID%
+
+[Philips_WinUSB.NTarm64]
+%DeviceName% = USB_Install, USB\%DeviceID%
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,%DeviceGUID%

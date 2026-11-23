@@ -42,7 +42,8 @@ VBASS_MAX_DB = 9.0
 
 CONFIG_FILE_NAME = "philips-pc-link.txt"
 INCLUDE_LINE = f"Include: {CONFIG_FILE_NAME}"
-DEVICE_PATTERN = "Philips Audio Set"
+DEVICE_NAMES = ("Philips Audio Set", "UAC3553B")
+DEVICE_PATTERN = "; ".join(DEVICE_NAMES)  # Equalizer APO "Device:" line
 EAPO_REG_PATH = r"SOFTWARE\EqualizerAPO"
 
 
@@ -184,7 +185,7 @@ def philips_has_apo(endpoint_ids: list[str] | None = None) -> bool:
                         name, _ = winreg.QueryValueEx(props, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
                 except OSError:
                     continue
-                if DEVICE_PATTERN.lower() not in str(name).lower():
+                if not any(n.lower() in str(name).lower() for n in DEVICE_NAMES):
                     continue
                 try:
                     with winreg.OpenKey(render, guid + r"\FxProperties") as fx:

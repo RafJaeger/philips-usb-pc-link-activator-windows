@@ -733,7 +733,7 @@ class MainWindow(QMainWindow):
     def _update_steps(self, status) -> None:
         if not status.present:
             self.step_driver.set_state("idle", "Conecte o cabo USB e coloque o radio em PC LINK.")
-        elif status.interface3_service == "WinUSB":
+        elif (status.interface3_service or "").upper() == "WINUSB":
             self.step_driver.set_state("done", "Instalado somente na interface de controle (MI_03).")
         else:
             self.step_driver.set_state("todo", "Clique para instalar. O Windows vai pedir permissao.")
@@ -1087,7 +1087,7 @@ class MainWindow(QMainWindow):
         self.lcd.set_indicator("USB", bool(status.present))
         self._last_status = status
 
-        driver_installed = status.interface3_service == "WinUSB"
+        driver_installed = (status.interface3_service or "").upper() == "WINUSB"
         operation_running = self._operation_running
         can_install = bool(status.profile and status.present and not driver_installed and not operation_running)
         self.install_button.setEnabled(can_install)

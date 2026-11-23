@@ -310,7 +310,7 @@ def get_status() -> DeviceStatus:
     service = pnp.service if pnp else _read_usb_interface_service(profile)
     control_access = bool(usb_profile)
     audio = bool(pnp.audio_present) if pnp and pnp.present else find_philips_render_endpoint(profile) is not None
-    winusb = service == "WinUSB"
+    winusb = (service or "").upper() == "WINUSB"
     ready = present and winusb and control_access
     default_endpoint = is_philips_default_output(profile) if present and audio else False
 
@@ -503,7 +503,7 @@ def find_philips_render_endpoint_fast() -> LightEndpoint | None:
             name = _endpoint_friendly_name(dev)
         except Exception:  # noqa: BLE001
             continue
-        if "Philips Audio Set" in name:
+        if "Philips Audio Set" in name or "UAC3553B" in name:
             return LightEndpoint(dev, dev.GetId(), name)
     return None
 
