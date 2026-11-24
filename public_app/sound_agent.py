@@ -170,6 +170,44 @@ def send_frame(
     )
 
 
+def send_frame_legacy(
+    handle,
+    packet: bytes,
+    *,
+    timeout_ms: int = 1000,
+    ready_timeout_s: float = 1.25,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    strict_length: bool = True,
+) -> int:
+    """Send one frame the way PhilipsRemote talks to 0471:0110 units.
+
+    A4F4 = frame, A4F2 = 0, B0A0 = C0, then wait until A4F2 reaches the frame
+    size (0471:0111 units use the A544 mailbox instead, see send_frame).
+    Transport contributed by geracerejo (github.com/geracerejo).
+    """
+    packet = bytes(packet)
+    if not packet or len(packet) > MAX_FRAME_BYTES:
+        raise SoundAgentError("Pacote PC Link com tamanho invalido.")
+    if strict_length and packet[0] + 1 != len(packet):
+        raise SoundAgentError("Pacote PC Link com tamanho invalido.")
+    _write_memory(handle, 0xA4F4, packet, timeout_ms=timeout_ms)
+    _write_memory(handle, 0xA4F2, b"\x00", timeout_ms=timeout_ms)
+    _write_memory(handle, 0xB0A0, b"\xC0", timeout_ms=timeout_ms)
+    deadline = monotonic() + max(0.05, float(ready_timeout_s))
+    polls = 0
+    while True:
+        done = _read_memory(handle, 0xA4F2, 1, timeout_ms=timeout_ms)[0]
+        polls += 1
+        if done >= packet[0] or done >= len(packet):
+            return polls
+        if monotonic() >= deadline:
+            raise SoundAgentError(
+                f"O aparelho nao confirmou o quadro PC Link: A4F2 permaneceu em 0x{done:02X}."
+            )
+        sleep(0.01)
+
+
 def read_memory(handle, address: int, length: int, *, timeout_ms: int = 1000) -> bytes:
     return _read_memory(handle, address, length, timeout_ms=timeout_ms)
 

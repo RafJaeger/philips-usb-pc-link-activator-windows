@@ -18,6 +18,8 @@ import winreg
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from profiles import PHILIPS_OUTPUT_NAMES, is_philips_output_name
+
 BANDS_HZ = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 BAND_LABELS = ("31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K")
 GAIN_MIN_DB = -12.0
@@ -42,7 +44,9 @@ VBASS_MAX_DB = 9.0
 
 CONFIG_FILE_NAME = "philips-pc-link.txt"
 INCLUDE_LINE = f"Include: {CONFIG_FILE_NAME}"
-DEVICE_PATTERN = "Philips Audio Set"
+# Equalizer APO "Device:" line: one or more name patterns separated by ";"
+# ("Philips Audio Set" on 0471:0111, "UAC3553B" on some 0471:0110 units).
+DEVICE_PATTERN = "; ".join(PHILIPS_OUTPUT_NAMES)
 EAPO_REG_PATH = r"SOFTWARE\EqualizerAPO"
 
 
@@ -184,7 +188,7 @@ def philips_has_apo(endpoint_ids: list[str] | None = None) -> bool:
                         name, _ = winreg.QueryValueEx(props, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
                 except OSError:
                     continue
-                if DEVICE_PATTERN.lower() not in str(name).lower():
+                if not is_philips_output_name(name):
                     continue
                 try:
                     with winreg.OpenKey(render, guid + r"\FxProperties") as fx:
@@ -220,4 +224,11 @@ def write_config(settings: EqualizerSettings, folder: Path | None = None) -> Pat
     temporary = target.with_suffix(".tmp")
     temporary.write_text(build_config(settings), encoding="utf-8")
     temporary.replace(target)
+    # 0.6.1 wrote config.txt with "\r\r\n": Equalizer APO then ignored the include.
+    try:
+        from equalizer_setup import repair_line_endings
+
+        repair_line_endings(Path(target_dir) / "config.txt")
+    except Exception:  # noqa: BLE001 - never block saving the curve
+        pass
     return target

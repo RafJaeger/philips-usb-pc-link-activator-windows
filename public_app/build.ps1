@@ -69,8 +69,20 @@ if ($OneFile) {
     $mode = '--onefile'
 }
 
+# Every complete driver package (one .inf, .cat and .cer each) under driver\.
+$driverArgs = @()
+foreach ($package in Get-ChildItem -Directory (Join-Path $AppRoot 'driver')) {
+    $complete = @('*.inf', '*.cat', '*.cer' | ForEach-Object { @(Get-ChildItem $package.FullName -Filter $_).Count -eq 1 })
+    if ($complete -contains $false) {
+        Write-Host "Pacote de driver incompleto, fora do exe: $($package.Name)"
+        continue
+    }
+    $driverArgs += @('--add-data', "driver\$($package.Name);driver\$($package.Name)")
+}
+
 python -m PyInstaller `
     $mode `
+    @driverArgs `
     --noconfirm `
     --clean `
     --windowed `
@@ -79,7 +91,6 @@ python -m PyInstaller `
     --icon "assets\app.ico" `
     --version-file $versionFile `
     --add-data "assets;assets" `
-    --add-data "driver\winusb-philips-mi03;driver\winusb-philips-mi03" `
     --add-data "docs;docs" `
     --add-data "AUTHORS.md;." `
     --add-data "LICENSE;." `

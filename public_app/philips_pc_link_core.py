@@ -20,7 +20,14 @@ from pycaw.pycaw import AudioUtilities, ERole
 import platform
 
 from pc_link_protocol import MediaInfo, PcLinkSession, is_pc_link_request
-from profiles import SUPPORTED_PROFILES, DeviceProfile, default_profile, find_profile_by_usb_id
+from profiles import (
+    SUPPORTED_PROFILES,
+    DeviceProfile,
+    default_profile,
+    find_profile_by_usb_id,
+    is_philips_output_name,
+    uses_legacy_transport,
+)
 from sound_agent import (
     SoundAgentState,
     handle_mcm_notification,
@@ -310,7 +317,7 @@ def get_status() -> DeviceStatus:
     service = pnp.service if pnp else _read_usb_interface_service(profile)
     control_access = bool(usb_profile)
     audio = bool(pnp.audio_present) if pnp and pnp.present else find_philips_render_endpoint(profile) is not None
-    winusb = service == "WinUSB"
+    winusb = admin_tasks.is_winusb(service)
     ready = present and winusb and control_access
     default_endpoint = is_philips_default_output(profile) if present and audio else False
 
@@ -367,8 +374,14 @@ def decode_button_report(
 def install_winusb_driver(profile: DeviceProfile | None = None) -> None:
     active_profile = profile or detect_profile() or default_profile()
     package = driver_dir(active_profile)
-    if not package.exists():
-        raise FileNotFoundError(f"Pacote do driver ausente: {package}")
+    if not package.exists() or not any(package.glob("*.inf")):
+        interface = active_profile.control_hardware_id_suffix
+        raise FileNotFoundError(
+            f"Este app ainda nao traz o driver WinUSB para {active_profile.display_name} "
+            f"({active_profile.vid_pid_label}). Instale o WinUSB somente na interface de controle "
+            f"{interface} com o Zadig (Options > List All Devices, escolha a interface {interface}); "
+            "nunca na MI_00 (audio)."
+        )
     _admin("install-driver", [str(package)], "Falha ao instalar o driver WinUSB.")
 
 
@@ -417,6 +430,11 @@ def _send_pc_link_enable(active_profile: DeviceProfile, family: str) -> str:
                     f"addr={dev.getDeviceAddress()} serial={serial!r} revisao={revision:04x}",
                 ]
                 if family == "MCM":
+                    if uses_legacy_transport(active_profile.product_id):
+                        raise RuntimeError(
+                            f"O modo MCM (Sound Agent) usa o chip 0471:0111; este aparelho e "
+                            f"{active_profile.vid_pid_label}. Escolha FWM/FWC."
+                        )
                     lines.append(
                         initialize_mcm_sound_agent(handle, revision=revision)
                     )
@@ -503,7 +521,7 @@ def find_philips_render_endpoint_fast() -> LightEndpoint | None:
             name = _endpoint_friendly_name(dev)
         except Exception:  # noqa: BLE001
             continue
-        if "Philips Audio Set" in name:
+        if is_philips_output_name(name):
             return LightEndpoint(dev, dev.GetId(), name)
     return None
 
@@ -526,7 +544,7 @@ def find_philips_render_endpoint(profile: DeviceProfile | None = None):
         properties = getattr(device, "properties", {}) or {}
         property_text = " ".join(str(value).upper() for value in properties.values())
         if endpoint_id.startswith("{0.0.0.") and (
-            audio_id in property_text or "Philips Audio Set" in friendly_name
+            audio_id in property_text or is_philips_output_name(friendly_name)
         ):
             return device
     return None
@@ -654,8 +672,21 @@ class WindowsPcLinkHost:
         return get_default_volume()
 
 
+def _is_legacy_handle(handle) -> bool:
+    try:
+        return uses_legacy_transport(handle.getDevice().getProductID())
+    except Exception:  # noqa: BLE001 - test doubles and closed handles
+        return False
+
+
 def ensure_pc_link_mailbox(handle) -> list[str]:
-    """Install the original setup block once, if the unit does not have it."""
+    """Install the original setup block once, if the unit does not have it.
+
+    Only 0471:0111 units use that block (A544 mailbox); 0471:0110 units reply
+    through A4F2/B0A0 and must not receive code meant for the other chip.
+    """
+    if _is_legacy_handle(handle):
+        return []
     if mailbox_handler_installed(handle):
         return []
     return install_mailbox_handler(handle)

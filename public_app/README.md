@@ -55,11 +55,18 @@ USB\VID_0471&PID_0111&MI_03
 
 ## Supported Hardware
 
-Current stable profile:
+Profiles:
 
-| Profile | Models | USB ID | Audio interface | Control interface |
-| --- | --- | --- | --- | --- |
-| `philips-uac3553b-0471-0111` | FW-M589/FWM589, FW-M779/FWM779, MCM530, MCM590 and related Philips Audio Set devices | `0471:0111` | `MI_00` | `MI_03` |
+| Profile | Models | USB ID | Audio interface | Control interface | Reply transport |
+| --- | --- | --- | --- | --- | --- |
+| `philips-uac3553b-0471-0111` | FW-M589/FWM589, FW-M779/FWM779, FW-C577, MCM530, MCM590 and related Philips Audio Set devices | `0471:0111` | `MI_00` | `MI_03` | A544 mailbox |
+| `philips-uac3553b-0471-0110` | FW-C577 units that enumerate as `0471:0110` (output may be named "UAC3553B") | `0471:0110` | `MI_00` | `MI_02` | A4F4/A4F2/B0A0 |
+
+The `0471:0110` profile, its reply transport and the Equalizer APO line-ending
+fix were contributed by [geracerejo](https://github.com/geracerejo). Its WinUSB
+driver package is not bundled yet: install WinUSB only on `MI_02` with Zadig
+(never on `MI_00`/`MI_01`, the audio). MCM (Sound Agent) mode is for
+`0471:0111` only.
 
 Other Philips systems with "USB PC Link" should be added through explicit
 profiles after descriptor captures and real playback tests. The app must not
@@ -277,5 +284,8 @@ model, copy, QA checklist, and risks.
 
 - Rafael Jaeger: original idea, hardware testing, and validation on Philips
   FW-M589/FWM589.
+- [geracerejo](https://github.com/geracerejo): FW-C577 `0471:0110` support
+  (control on `MI_02`, A4F2/B0A0 reply transport), the `UAC3553B` output name
+  and the Equalizer APO `config.txt` line-ending fix.
 - Philips USB PC Link Linux community: public interoperability notes for the
   `0471:0111` activation sequence.

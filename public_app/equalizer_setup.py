@@ -26,6 +26,8 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
+from profiles import PHILIPS_OUTPUT_NAMES, is_philips_output_name
+
 HKLM = winreg.HKEY_LOCAL_MACHINE
 VIEW = winreg.KEY_WOW64_64KEY
 
@@ -270,7 +272,7 @@ def philips_endpoints() -> list[str]:
     found = []
     for guid in subkeys(RENDER):
         name = get(rf"{RENDER}\{guid}\Properties", DEVICE_NAME_KEY)
-        if isinstance(name, str) and "philips audio set" in name.lower():
+        if isinstance(name, str) and is_philips_output_name(name):
             found.append(guid)
     return found
 
@@ -480,21 +482,40 @@ def _write_config(install_path: Path) -> None:
     folder = Path(get(EAPO_KEY, "ConfigPath") or install_path / "config")
     folder.mkdir(parents=True, exist_ok=True)
     config = folder / "config.txt"
+    repair_line_endings(config)
     current = config.read_text(encoding="utf-8", errors="replace") if config.exists() else ""
     if INCLUDE_LINE not in current:
         normalized = " ".join(current.split())
+        # "\n" only: write_text() turns it into CRLF on Windows. Writing "\r\n" here
+        # produced "\r\r\n" and Equalizer APO read the include name with a trailing
+        # "\r", ignoring the curve (found by geracerejo).
         if normalized in ("", DEFAULT_142):
             if current:
                 (folder / "config.txt.original").write_text(current, encoding="utf-8")
-            text = f"# Equalizer APO - configurado pelo Philips USB PC Link Activator\r\n{INCLUDE_LINE}\r\n"
+            text = f"# Equalizer APO - configurado pelo Philips USB PC Link Activator\n{INCLUDE_LINE}\n"
         else:
             (folder / "config.txt.antes-philips").write_text(current, encoding="utf-8")
-            text = current.rstrip() + f"\r\n{INCLUDE_LINE}\r\n"
+            text = current.rstrip() + f"\n{INCLUDE_LINE}\n"
         config.write_text(text, encoding="utf-8")
         print("config.txt do Equalizer APO aponta para o equalizador do app.")
     app_file = folder / "philips-pc-link.txt"
+    repair_line_endings(app_file)
     if not app_file.exists():
-        app_file.write_text("Device: Philips Audio Set\r\nDevice: all\r\n", encoding="utf-8")
+        app_file.write_text(f"Device: {'; '.join(PHILIPS_OUTPUT_NAMES)}\nDevice: all\n", encoding="utf-8")
+
+
+def repair_line_endings(path: Path) -> bool:
+    """Fix files written by 0.6.1 with "\\r\\r\\n" line ends (returns True if fixed)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if b"\r\r\n" not in data:
+        return False
+    fixed = data.replace(b"\r\r\n", b"\r\n")
+    path.write_bytes(fixed)
+    print(f"Quebras de linha corrigidas em {path.name}.")
+    return True
 
 
 def install(installer: Path) -> None:

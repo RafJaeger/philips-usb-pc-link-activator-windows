@@ -78,7 +78,39 @@ SUPPORTED_PROFILES: tuple[DeviceProfile, ...] = (
             "other Philips USB PC Link systems detected as 0471:0111",
         ),
     ),
+    # Variant with the HID control interface on MI_02 (no MI_03). The original
+    # Philips uacflt.inf lists 0471:0110 with the same A4EF/A4F0 plug-in data.
+    # Replies use the older A4F4/A4F2/B0A0 transport (sound_agent.send_frame_legacy).
+    # Profile and transport contributed by geracerejo (github.com/geracerejo).
+    DeviceProfile(
+        profile_id="philips-uac3553b-0471-0110",
+        display_name="Philips USB PC Link / UAC3553B (0110)",
+        vendor_id=0x0471,
+        product_id=0x0110,
+        control_interface=2,
+        control_hardware_id_suffix="MI_02",
+        audio_interface=0,
+        interrupt_endpoint=0x83,
+        interrupt_packet_size=2,
+        driver_package="winusb-philips-0110-mi02",
+        pc_link_packets=PC_LINK_PACKETS,
+        known_models=("FW-C577 / FWC577 (0471:0110)",),
+    ),
 )
+
+# Names Windows gives the stereo's audio output (0111: "Philips Audio Set";
+# some 0110 units show the chip name).
+PHILIPS_OUTPUT_NAMES = ("Philips Audio Set", "UAC3553B")
+
+
+def is_philips_output_name(name: str | None) -> bool:
+    text = str(name or "").lower()
+    return any(candidate.lower() in text for candidate in PHILIPS_OUTPUT_NAMES)
+
+
+def uses_legacy_transport(product_id: int) -> bool:
+    """0471:0110 units answer through A4F2/B0A0 and have no A544 mailbox hook."""
+    return product_id == 0x0110
 
 
 def find_profile_by_usb_id(vendor_id: int, product_id: int) -> DeviceProfile | None:

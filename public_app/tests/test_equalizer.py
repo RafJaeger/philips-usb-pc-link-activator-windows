@@ -19,7 +19,7 @@ class EqualizerConfigTests(unittest.TestCase):
     def test_flat_curve_only_targets_the_philips_output(self):
         text = build_config(EqualizerSettings())
         lines = text.strip().splitlines()
-        self.assertIn("Device: Philips Audio Set", lines)
+        self.assertIn("Device: Philips Audio Set; UAC3553B", lines)
         self.assertIn("Preamp: 0.0 dB", lines)
         self.assertFalse(any(line.startswith("Filter:") for line in lines))
         self.assertEqual(lines[-1], "Device: all")
