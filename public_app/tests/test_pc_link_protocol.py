@@ -98,11 +98,19 @@ class TextTests(unittest.TestCase):
         self.assertEqual(display_text(None), "")
 
     def test_text_frame_matches_philipsremote_format(self):
-        self.assertEqual(text_frame(0x40, "Song"), bytes((6, 0x40, 0x82)) + b"Song")
+        # One trailing space: the FWM589 never shows the last byte of the text.
+        self.assertEqual(text_frame(0x40, "Song"), bytes((7, 0x40, 0x82)) + b"Song ")
         self.assertEqual(text_frame(0x41, ""), bytes((2, 0x41, 0x81)))
         frame = text_frame(0x40, "y" * 80)
-        self.assertEqual(len(frame), 19)
+        self.assertEqual(len(frame), 19)  # still at most 16 text characters
+        self.assertEqual(frame[-1:], b" ")
         self.assertEqual(frame[0] + 1, len(frame))
+
+    def test_last_letter_of_a_full_window_is_kept(self):
+        self.assertEqual(text_frame(0x40, "Gorillaz", exact=True)[3:], b"Gorillaz ")
+        self.assertEqual(text_frame(0x40, " PAUSA  ", exact=True)[3:], b" PAUSA  ")
+        sixteen = text_frame(0x40, "ABCDEFGHIJKLMNOP", exact=True)
+        self.assertEqual(sixteen[3:], b"ABCDEFGHIJKLMNO ")
 
     def test_request_detection_excludes_sound_agent_and_status(self):
         self.assertTrue(is_pc_link_request(bytes.fromhex("80 4a")))
@@ -358,7 +366,7 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(handle.frames(), [text_frame(0x40, "ndromeda", exact=True)])
 
     def test_exact_frame_keeps_spaces(self):
-        self.assertEqual(text_frame(0x40, " Gorilla", exact=True), bytes((10, 0x40, 0x82)) + b" Gorilla")
+        self.assertEqual(text_frame(0x40, " Gorilla", exact=True), bytes((11, 0x40, 0x82)) + b" Gorilla ")
         self.assertEqual(text_frame(0x40, "", exact=True), bytes((2, 0x40, 0x81)))
 
     def test_width_setting_changes_window(self):

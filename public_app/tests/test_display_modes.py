@@ -40,6 +40,20 @@ class EffectTests(unittest.TestCase):
         self.assertEqual(fit("PAUSA", 8), " PAUSA  ")
         self.assertEqual(fit("ABCDEFGHIJ", 8), "ABCDEFGH")
 
+    def test_short_notices_stay_in_the_first_8_chars_on_wide_settings(self):
+        # An 8-character FWM589 configured as 16 wide shows only the first 8.
+        for text in ("PLAY", "PAUSA", "MUDO", "VOL  45%", "RELOGIO", "21:45:08"):
+            window = fit(text, 16)
+            self.assertEqual(len(window), 16)
+            self.assertEqual(window[:8].strip(), text, text)
+        self.assertEqual(fit("ABCDEFGHIJKL", 16), "  ABCDEFGHIJKL  ")
+
+    def test_composer_notices_on_a_16_wide_setting(self):
+        item = composer()
+        item.window(0.0, SONG, 16)
+        item.notify("PAUSA", 1.0, 1.6)
+        self.assertEqual(item.window(1.1, SONG, 16)[:8], " PAUSA  ")
+
     def test_scroll_holds_then_moves_and_wraps(self):
         text = "Andromeda - Gorillaz"
         self.assertEqual(scroll_window(text, 8, 0.0), "Andromed")

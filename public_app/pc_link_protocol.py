@@ -198,6 +198,11 @@ def text_frame(command: int, value: str | None, *, exact: bool = False) -> bytes
         text = display_text(value).encode("ascii")
     if not text:
         return bytes((0x02, command, FAIL))
+    # A real FWM589 never shows the last byte of the text (it reads it as an
+    # end marker), so "Gorillaz" appeared as "Gorilla". One trailing space is
+    # sent, still within the 16-character limit that freezes the display.
+    if not text.endswith(b" "):
+        text = text[: MAX_TEXT_CHARS - 1] + b" "
     return bytes((len(text) + 2, command, OK)) + text
 
 

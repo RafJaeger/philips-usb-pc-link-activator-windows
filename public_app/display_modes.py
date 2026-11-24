@@ -58,11 +58,22 @@ AUTO_SECONDS = 8.0
 GAP = "   "
 
 
+# Every Philips PC Link display shows at least this many characters (FWM589: 8).
+SAFE_WIDTH = 8
+
+
 def fit(text: str, width: int) -> str:
-    """Center a short text in the display, trimming long ones."""
+    """Center a short text in the display, trimming long ones.
+
+    A text that fits in SAFE_WIDTH is centered inside the first SAFE_WIDTH
+    characters even when a wider width is configured, so PLAY, PAUSA, VOL and
+    the clock are never cut on an 8-character display set to 16.
+    """
     text = text[:width]
-    pad = width - len(text)
-    return " " * (pad // 2) + text + " " * (pad - pad // 2)
+    area = SAFE_WIDTH if width > SAFE_WIDTH and len(text) <= SAFE_WIDTH else width
+    pad = area - len(text)
+    centered = " " * (pad // 2) + text + " " * (pad - pad // 2)
+    return centered.ljust(width)
 
 
 def scroll_window(text: str, width: int, elapsed: float, *, step_s: float = STEP_S, hold_s: float = HOLD_S) -> str:
