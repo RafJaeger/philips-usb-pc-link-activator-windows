@@ -176,12 +176,35 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(admin_tasks.is_winusb("HidUsb"))
         self.assertFalse(admin_tasks.is_winusb(None))
 
-    def test_0110_without_bundled_driver_explains_zadig(self):
+    def test_every_profile_has_a_complete_driver_package(self):
+        for profile in SUPPORTED_PROFILES:
+            package = core.driver_dir(profile)
+            inf = admin_tasks._package_file(package, "*.inf")
+            admin_tasks._package_file(package, "*.cat")
+            admin_tasks._package_file(package, "*.cer")
+            text = admin_tasks.read_inf(inf)
+            admin_tasks.check_inf_targets_control_only(text)
+            self.assertIn(profile.control_hardware_id.split("\\", 1)[1], text.upper())
+
+    def test_0110_catalog_matches_its_inf_bytes(self):
+        # The catalog hashes the INF exactly as committed; a line-ending
+        # conversion (git autocrlf) would break the driver signature.
+        import hashlib
+
+        package = core.driver_dir(find_profile_by_usb_id(0x0471, 0x0110))
+        inf = admin_tasks._package_file(package, "*.inf").read_bytes()
+        cat = admin_tasks._package_file(package, "*.cat").read_bytes()
+        self.assertIn(hashlib.sha1(inf).digest(), cat)
+
+    def test_missing_driver_package_explains_zadig(self):
         profile = find_profile_by_usb_id(0x0471, 0x0110)
-        if core.driver_dir(profile).exists():
-            self.skipTest("0110 driver package is bundled")
-        with self.assertRaisesRegex(FileNotFoundError, "MI_02"):
-            core.install_winusb_driver(profile)
+        original = core.driver_dir
+        core.driver_dir = lambda _profile=None: Path(tempfile.gettempdir()) / "no-such-philips-driver"
+        try:
+            with self.assertRaisesRegex(FileNotFoundError, "MI_02"):
+                core.install_winusb_driver(profile)
+        finally:
+            core.driver_dir = original
 
 
 class EqualizerFileTests(unittest.TestCase):

@@ -62,10 +62,9 @@ Profiles:
 | `philips-uac3553b-0471-0111` | FW-M589/FWM589, FW-M779/FWM779, FW-C577, MCM530, MCM590 and related Philips Audio Set devices | `0471:0111` | `MI_00` | `MI_03` | A544 mailbox |
 | `philips-uac3553b-0471-0110` | FW-C577 units that enumerate as `0471:0110` (output may be named "UAC3553B") | `0471:0110` | `MI_00` | `MI_02` | A4F4/A4F2/B0A0 |
 
-The `0471:0110` profile, its reply transport and the Equalizer APO line-ending
-fix were contributed by [geracerejo](https://github.com/geracerejo). Its WinUSB
-driver package is not bundled yet: install WinUSB only on `MI_02` with Zadig
-(never on `MI_00`/`MI_01`, the audio). MCM (Sound Agent) mode is for
+The `0471:0110` profile, its reply transport, its WinUSB driver package and
+the Equalizer APO line-ending fix were contributed by
+[geracerejo](https://github.com/geracerejo). MCM (Sound Agent) mode is for
 `0471:0111` only.
 
 Other Philips systems with "USB PC Link" should be added through explicit
@@ -253,14 +252,18 @@ local driver experiments, and extracted vendor installers out of Git.
 
 ## Driver Installation
 
-The app includes a WinUSB package for the validated control interface:
+The app includes one WinUSB package per supported control interface:
 
 ```text
-driver\winusb-philips-mi03
+driver\winusb-philips-mi03        0471:0111 MI_03 (libwdi/Zadig, key discarded)
+driver\winusb-philips-0110-mi02   0471:0110 MI_02 (contributed by geracerejo,
+                                   signed with the contributor's local certificate)
 ```
 
-The installer imports the bundled certificate for the driver package and runs
-`pnputil /add-driver`. This is acceptable for testing/community builds, but a
+Only the package of the connected model is installed. The installer imports
+that package's certificate (Root and TrustedPublisher, code signing only) and
+runs `pnputil /add-driver`. The catalogs hash the INF bytes exactly, so
+`driver/.gitattributes` keeps git from converting their line endings. This is acceptable for testing/community builds, but a
 public commercial release should use a trusted code-signing certificate and a
 production-signed driver package.
 
@@ -285,7 +288,8 @@ model, copy, QA checklist, and risks.
 - Rafael Jaeger: original idea, hardware testing, and validation on Philips
   FW-M589/FWM589.
 - [geracerejo](https://github.com/geracerejo): FW-C577 `0471:0110` support
-  (control on `MI_02`, A4F2/B0A0 reply transport), the `UAC3553B` output name
+  (control on `MI_02`, A4F2/B0A0 reply transport, WinUSB driver package), the
+  `UAC3553B` output name
   and the Equalizer APO `config.txt` line-ending fix.
 - Philips USB PC Link Linux community: public interoperability notes for the
   `0471:0111` activation sequence.
