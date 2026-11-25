@@ -1086,7 +1086,14 @@ class MainWindow(QMainWindow):
         else:
             self.header.set_led("off", "DESCONECTADO")
         self.lcd.set_indicator("USB", bool(status.present))
+        previous = getattr(self, "_last_status", None)
+        audio_back = bool(status.present and status.audio_present) and not (
+            previous is not None and previous.present and previous.audio_present
+        )
         self._last_status = status
+        if audio_back and previous is not None:
+            # Windows recreated the Philips output: the chip tone needs the new one.
+            self.equalizer_panel.radio_returned()
 
         driver_installed = admin_tasks.is_winusb(status.interface3_service)
         operation_running = self._operation_running

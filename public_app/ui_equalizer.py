@@ -354,21 +354,27 @@ class EqualizerPanel(QWidget):
 
     # ----- chip tone -----
 
-    def connect_chip(self) -> None:
+    def connect_chip(self, *, keep_sliders: bool = False) -> bool:
+        """(Re)open the chip's bass/treble controls on the current Philips output.
+
+        keep_sliders=True keeps the user's slider positions (they are applied
+        right after); otherwise the sliders show what the chip has now.
+        """
         try:
             self._chip = self._chip_tone_factory()
         except Exception as exc:  # noqa: BLE001
             self._chip = None
             self.tone_status.setText(f"Controles do chip indisponiveis: {exc}")
         available = bool(self._chip is not None and self._chip.available)
-        for widget in (self.bass_slider, self.treble_slider, self.tone_reset):
-            widget.setEnabled(available)
+        # Sliders stay usable: a move made while the radio is away is applied
+        # as soon as it comes back (see _tone_changed).
         self.agc_checkbox.setEnabled(bool(available and self._chip.has_agc))
         if not available:
-            if not self.tone_status.text():
-                self.tone_status.setText("Saida Philips nao encontrada. Conecte o radio.")
-            return
+            self.tone_status.setText("Saida Philips nao encontrada. Conecte o radio em PC LINK.")
+            return False
         self.tone_status.setText("Aplicado direto no chip do radio.")
+        if keep_sliders:
+            return True
         self._loading = True
         bass = self._chip.bass or 0.0
         treble = self._chip.treble or 0.0
@@ -378,19 +384,37 @@ class EqualizerPanel(QWidget):
         self.treble_value.setText(f"{_db_text(treble)} dB")
         self.agc_checkbox.setChecked(bool(self._chip.agc))
         self._loading = False
+        return True
+
+    def radio_returned(self) -> None:
+        """The stereo's audio output came back: reconnect and re-apply the sliders."""
+        if self.connect_chip(keep_sliders=True):
+            self._apply_tone(self.bass_slider.value() / STEPS_PER_DB, self.treble_slider.value() / STEPS_PER_DB)
 
     def _tone_changed(self, *_args) -> None:
         bass = self.bass_slider.value() / STEPS_PER_DB
         treble = self.treble_slider.value() / STEPS_PER_DB
         self.bass_value.setText(f"{_db_text(bass)} dB")
         self.treble_value.setText(f"{_db_text(treble)} dB")
-        if self._loading or self._chip is None:
+        if self._loading:
             return
+        if self._apply_tone(bass, treble):
+            return
+        # The radio's audio output is recreated by Windows whenever the stereo
+        # leaves/returns to PC Link or the cable is replugged: reconnect once.
+        self.connect_chip(keep_sliders=True)
+        if not self._apply_tone(bass, treble):
+            self.tone_status.setText("Saida Philips nao encontrada. Conecte o radio em PC LINK.")
+
+    def _apply_tone(self, bass: float, treble: float) -> bool:
+        if self._chip is None or not self._chip.available:
+            return False
         try:
             self._chip.set_bass(bass)
             self._chip.set_treble(treble)
-        except Exception as exc:  # noqa: BLE001 - unplugged
-            self.tone_status.setText(f"Falha ao ajustar o chip: {exc}")
+            return True
+        except Exception:  # noqa: BLE001 - stale endpoint after replug
+            return False
 
     def _agc_changed(self, *_args) -> None:
         if self._loading or self._chip is None:
